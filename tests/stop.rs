@@ -1,122 +1,8 @@
+mod common;
+
 use std::fs;
-use std::io::Write;
-use std::process::{Command, Stdio};
 
-fn run_cli(stdin_json: &str) -> (i32, String, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_claudtributter"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn binary");
-
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(stdin_json.as_bytes())
-        .unwrap();
-
-    let output = child.wait_with_output().unwrap();
-    (
-        output.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&output.stdout).to_string(),
-        String::from_utf8_lossy(&output.stderr).to_string(),
-    )
-}
-
-/// Create a temp dir containing a git repo with an initial commit and return it.
-/// The `TempDir` must be kept alive for the duration of the test.
-fn temp_git_repo() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    let repo = git2::Repository::init(dir.path()).unwrap();
-
-    // Configure user identity for commits.
-    let mut config = repo.config().unwrap();
-    config.set_str("user.name", "Test").unwrap();
-    config.set_str("user.email", "test@test.com").unwrap();
-
-    // Create an initial commit so HEAD exists.
-    let sig = repo.signature().unwrap();
-    let tree_oid = repo.index().unwrap().write_tree().unwrap();
-    let tree = repo.find_tree(tree_oid).unwrap();
-    repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
-        .unwrap();
-
-    dir
-}
-
-fn common(cwd: &str, transcript_path: &str) -> String {
-    format!(
-        r#"
-    "session_id": "test-session",
-    "transcript_path": "{transcript_path}",
-    "cwd": "{cwd}",
-    "permission_mode": "default"
-"#
-    )
-}
-
-/// Common fields pointing at a non-git /tmp dir (for handlers that don't call data_dir).
-const COMMON_NO_GIT: &str = r#"
-    "session_id": "test-session",
-    "transcript_path": "/tmp/t.jsonl",
-    "cwd": "/tmp",
-    "permission_mode": "default"
-"#;
-
-#[test]
-fn handle_session_start() {
-    let repo = temp_git_repo();
-    let cwd = repo.path().to_str().unwrap();
-    let common = common(cwd, "/tmp/t.jsonl");
-    let input = format!(
-        r#"{{ {common},
-            "hook_event_name": "SessionStart",
-            "source": "startup",
-            "model": "claude-sonnet-4-5-20250929"
-        }}"#
-    );
-    let (code, stdout, stderr) = run_cli(&input);
-    assert_eq!(code, 0);
-    assert!(stderr.is_empty(), "expected no stderr, got: {stderr}");
-    // Test repo is on master, so we expect a branch warning.
-    let output: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert!(
-        output["systemMessage"].as_str().unwrap().contains("feature branch"),
-        "expected branch warning, got: {stdout}"
-    );
-    assert!(repo.path().join(".claudetributer").is_dir());
-}
-
-#[test]
-fn handle_user_prompt_submit() {
-    let repo = temp_git_repo();
-    let cwd = repo.path().to_str().unwrap();
-    let transcript = tempfile::NamedTempFile::new().unwrap();
-    fs::write(transcript.path(), "{\"type\":\"system\",\"uuid\":\"a\",\"subtype\":\"turn_duration\",\"isSidechain\":false,\"userType\":\"external\",\"cwd\":\"/tmp\",\"sessionId\":\"s\",\"timestamp\":\"t\",\"version\":\"v\",\"durationMs\":100,\"isMeta\":false}\n").unwrap();
-    let common = common(cwd, transcript.path().to_str().unwrap());
-    let input = format!(
-        r#"{{ {common}, "hook_event_name": "UserPromptSubmit", "prompt": "hello world" }}"#
-    );
-    let (code, stdout, stderr) = run_cli(&input);
-    assert_eq!(code, 0);
-    assert!(stderr.is_empty(), "expected no stderr, got: {stderr}");
-    let output: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert!(
-        output["systemMessage"].as_str().unwrap().contains("tracking prompt"),
-        "expected hint about tracking prompt, got: {stdout}"
-    );
-}
-
-/// Helper: read a plain-text git note from a specific ref on HEAD.
-fn read_note(repo_path: &std::path::Path, ref_name: &str) -> Option<String> {
-    let repo = git2::Repository::open(repo_path).unwrap();
-    let head_oid = repo.head().unwrap().peel_to_commit().unwrap().id();
-    repo.find_note(Some(ref_name), head_oid)
-        .ok()
-        .and_then(|note| note.message().map(|s| s.trim().to_string()))
-}
+use common::{common, read_note, run_cli, temp_git_repo};
 
 #[test]
 fn handle_stop() {
@@ -278,49 +164,6 @@ fn handle_stop_normal_continuation_no_false_reset() {
     assert!(!msg.contains("reset"), "normal continuation should NOT detect reset, got: {msg}");
 }
 
-#[test]
-fn handle_user_prompt_submit_blocks_on_uncommitted_changes() {
-    let repo = temp_git_repo();
-    let cwd = repo.path().to_str().unwrap();
-    // Create an uncommitted file so has_uncommitted_changes returns true.
-    fs::write(repo.path().join("dirty.txt"), "uncommitted content").unwrap();
-    let common = common(cwd, "/tmp/t.jsonl");
-    let input = format!(
-        r#"{{ {common}, "hook_event_name": "UserPromptSubmit", "prompt": "hello world" }}"#
-    );
-    let (code, stdout, stderr) = run_cli(&input);
-    assert_eq!(code, 0);
-    assert!(stderr.is_empty(), "expected no stderr, got: {stderr}");
-    let output: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(
-        output["decision"].as_str(),
-        Some("block"),
-        "expected block decision, got: {stdout}"
-    );
-    assert!(
-        output["reason"].as_str().unwrap().contains("uncommitted"),
-        "expected reason about uncommitted changes, got: {stdout}"
-    );
-}
-
-#[test]
-fn unhandled_event_passes_through() {
-    let input = format!(
-        r#"{{ {COMMON_NO_GIT},
-            "hook_event_name": "PostToolUseFailure",
-            "tool_name": "Bash",
-            "tool_input": {{ "command": "false" }},
-            "tool_use_id": "toolu_003",
-            "error": "exit code 1",
-            "is_interrupt": false
-        }}"#
-    );
-    let (code, stdout, stderr) = run_cli(&input);
-    assert_eq!(code, 0);
-    assert!(stdout.is_empty());
-    assert!(stderr.is_empty());
-}
-
 // =================================================================
 // Breadcrumb / continuation tests
 // =================================================================
@@ -476,23 +319,4 @@ fn reset_detected_via_breadcrumb() {
     let out: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let msg = out["systemMessage"].as_str().unwrap();
     assert!(msg.contains("reset detected"), "expected reset detected via breadcrumb, got: {msg}");
-}
-
-// =================================================================
-// Error handling
-// =================================================================
-
-#[test]
-fn rejects_invalid_json() {
-    let (code, _, _) = run_cli("not json");
-    assert_ne!(code, 0);
-}
-
-#[test]
-fn rejects_unknown_event() {
-    let input = format!(
-        r#"{{ {COMMON_NO_GIT}, "hook_event_name": "BogusEvent" }}"#
-    );
-    let (code, _, _) = run_cli(&input);
-    assert_ne!(code, 0);
 }
