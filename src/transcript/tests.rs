@@ -934,6 +934,92 @@ fn summarize_turn_bash_truncates_long_command() {
 }
 
 #[test]
+fn summarize_turn_ask_user_question_with_answers() {
+    let lines = vec![
+        json!({
+            "type": "user", "uuid": "u1",
+            "isSidechain": false, "userType": "external",
+            "cwd": "/tmp", "sessionId": "s", "timestamp": "t", "version": "v",
+            "message": { "role": "user", "content": "plan it" }
+        }),
+        json!({
+            "type": "assistant", "uuid": "a1", "parentUuid": "u1",
+            "isSidechain": false, "userType": "external",
+            "cwd": "/tmp", "sessionId": "s", "timestamp": "t", "version": "v",
+            "message": { "role": "assistant", "content": [
+                { "type": "tool_use", "id": "ask1", "name": "AskUserQuestion", "input": {
+                    "questions": [
+                        { "question": "How many rounds?", "header": "Rounds", "options": [], "multiSelect": false },
+                        { "question": "How many per round?", "header": "Count", "options": [], "multiSelect": false }
+                    ]
+                }},
+                { "type": "text", "text": "Let me ask some questions." }
+            ]}
+        }),
+        // User's answers come back as a tool_result
+        json!({
+            "type": "user", "uuid": "u2", "parentUuid": "a1",
+            "isSidechain": false, "userType": "external",
+            "cwd": "/tmp", "sessionId": "s", "timestamp": "t", "version": "v",
+            "message": { "role": "user", "content": [
+                { "type": "tool_result", "tool_use_id": "ask1",
+                  "content": "User has answered your questions: \"How many rounds?\"=\"2 rounds\", \"How many per round?\"=\"3-5\". You can now continue with the user's answers in mind." }
+            ]}
+        }),
+    ];
+    let contents = lines.iter().map(|v| serde_json::to_string(v).unwrap()).collect::<Vec<_>>().join("\n");
+    let (transcript, errors) = Transcript::parse(&contents);
+    assert!(errors.is_empty(), "parse errors: {errors:?}");
+    let turn = transcript.turn("u2", Some("u1"));
+
+    // Short: shows question count
+    let short = Transcript::summarize_turn(&turn, Verbosity::Short).unwrap();
+    assert!(short.contains("asked 2 questions"), "short should count questions: {short}");
+
+    // Medium: shows question texts
+    let medium = Transcript::summarize_turn(&turn, Verbosity::Medium).unwrap();
+    assert!(medium.contains("How many rounds?"), "medium should show questions: {medium}");
+    assert!(medium.contains("How many per round?"), "medium should show both questions: {medium}");
+
+    // Check Q&A extraction from tool_result
+    assert!(medium.contains("Q&A:"), "should have Q&A section: {medium}");
+    assert!(medium.contains("2 rounds"), "should include answers: {medium}");
+}
+
+#[test]
+fn summarize_turn_ask_user_question_without_answer() {
+    // AskUserQuestion with no matching tool_result (e.g. user interrupted)
+    let lines = vec![
+        json!({
+            "type": "user", "uuid": "u1",
+            "isSidechain": false, "userType": "external",
+            "cwd": "/tmp", "sessionId": "s", "timestamp": "t", "version": "v",
+            "message": { "role": "user", "content": "go" }
+        }),
+        json!({
+            "type": "assistant", "uuid": "a1", "parentUuid": "u1",
+            "isSidechain": false, "userType": "external",
+            "cwd": "/tmp", "sessionId": "s", "timestamp": "t", "version": "v",
+            "message": { "role": "assistant", "content": [
+                { "type": "tool_use", "id": "ask1", "name": "AskUserQuestion", "input": {
+                    "questions": [
+                        { "question": "Which approach?", "header": "Approach", "options": [], "multiSelect": false }
+                    ]
+                }}
+            ]}
+        }),
+    ];
+    let contents = lines.iter().map(|v| serde_json::to_string(v).unwrap()).collect::<Vec<_>>().join("\n");
+    let (transcript, _) = Transcript::parse(&contents);
+    let turn = transcript.turn("a1", Some("u1"));
+
+    let medium = Transcript::summarize_turn(&turn, Verbosity::Medium).unwrap();
+    assert!(medium.contains("asked: Which approach?"), "should show question even without answer: {medium}");
+    // No Q&A section since there's no tool_result
+    assert!(!medium.contains("Q&A:"), "no Q&A without answer: {medium}");
+}
+
+#[test]
 fn stop_hook_summary_does_not_break_ancestor_chain() {
     // Reproduces a real transcript where a stop_hook_summary system entry
     // sits between two turns. If it fails to parse, the ancestor chain is
@@ -1000,4 +1086,70 @@ fn stop_hook_summary_does_not_break_ancestor_chain() {
         transcript.is_ancestor("a2", "p1"),
         "p1 should be ancestor of a2 through sys1"
     );
+}
+
+#[test]
+fn user_texts_until_skips_committed_entries() {
+    // Simulate: productive turn (committed) → nonproductive turn → plan-mode trigger.
+    // committed_tail is "a1" (the assistant response of the productive turn).
+    let lines = vec![
+        json!({
+            "type": "user", "uuid": "u1",
+            "isSidechain": false, "userType": "external",
+            "cwd": "/tmp", "sessionId": "s", "timestamp": "t", "version": "v",
+            "message": { "role": "user", "content": "make a file with 10 random facts" }
+        }),
+        json!({
+            "type": "assistant", "uuid": "a1", "parentUuid": "u1",
+            "isSidechain": false, "userType": "external",
+            "cwd": "/tmp", "sessionId": "s", "timestamp": "t", "version": "v",
+            "message": { "role": "assistant", "content": [{"type": "text", "text": "Created file."}] }
+        }),
+        json!({
+            "type": "user", "uuid": "u2", "parentUuid": "a1",
+            "isSidechain": false, "userType": "external",
+            "cwd": "/tmp", "sessionId": "s", "timestamp": "t", "version": "v",
+            "message": { "role": "user", "content": "make a plan to pick one and make it wrong" }
+        }),
+        json!({
+            "type": "assistant", "uuid": "a2", "parentUuid": "u2",
+            "isSidechain": false, "userType": "external",
+            "cwd": "/tmp", "sessionId": "s", "timestamp": "t", "version": "v",
+            "message": { "role": "assistant", "content": [{"type": "text", "text": "Here's a plan..."}] }
+        }),
+        json!({
+            "type": "user", "uuid": "u3", "parentUuid": "a2",
+            "isSidechain": false, "userType": "external",
+            "cwd": "/tmp", "sessionId": "s", "timestamp": "t", "version": "v",
+            "message": { "role": "user", "content": "do it in plan mode" }
+        }),
+        json!({
+            "type": "assistant", "uuid": "a3", "parentUuid": "u3",
+            "isSidechain": false, "userType": "external",
+            "cwd": "/tmp", "sessionId": "s", "timestamp": "t", "version": "v",
+            "message": { "role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "ExitPlanMode", "input": {"plan": "the plan"}}
+            ]}
+        }),
+    ];
+    let contents = lines.iter().map(|v| serde_json::to_string(v).unwrap()).collect::<Vec<_>>().join("\n");
+    let (transcript, _) = Transcript::parse(&contents);
+
+    // With committed_tail at a1: should return u3 and u2 (post-commit user texts).
+    let texts = transcript.user_texts_until("a3", Some("a1"));
+    assert_eq!(texts.len(), 2);
+    assert_eq!(texts[0].1, "do it in plan mode");       // most recent
+    assert_eq!(texts[1].1, "make a plan to pick one and make it wrong"); // intent
+
+    // With no committed_tail: returns all 3 user texts.
+    let all = transcript.user_texts_until("a3", None);
+    assert_eq!(all.len(), 3);
+    assert_eq!(all[0].1, "do it in plan mode");
+    assert_eq!(all[1].1, "make a plan to pick one and make it wrong");
+    assert_eq!(all[2].1, "make a file with 10 random facts");
+
+    // With committed_tail at a2 (nonproductive turn's response): only u3.
+    let just_trigger = transcript.user_texts_until("a3", Some("a2"));
+    assert_eq!(just_trigger.len(), 1);
+    assert_eq!(just_trigger[0].1, "do it in plan mode");
 }

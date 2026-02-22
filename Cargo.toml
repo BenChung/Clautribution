@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
 git2 = "0.20.4"
 minijinja = "2"
 serde = { version = "1", features = ["derive"] }

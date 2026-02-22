@@ -514,18 +514,18 @@ impl Transcript {
             }
             // Parse the line once as a raw Value, then deserialize the typed
             // entry from the already-parsed tree to avoid double tokenization.
-            match serde_json::from_str::<serde_json::Value>(line) {
-                Ok(val) => {
-                    match serde_json::from_value::<TranscriptEntry>(val.clone()) {
-                        Ok(entry) => {
-                            if let Some(uuid) = entry.uuid() {
-                                by_uuid.insert(uuid.to_string(), entries.len());
-                                raw.insert(uuid.to_string(), val);
-                            }
-                            entries.push(entry);
+            match serde_json::from_str::<TranscriptEntry>(line) {
+                Ok(entry) => {
+                    if let Some(uuid) = entry.uuid() {
+                        by_uuid.insert(uuid.to_string(), entries.len());
+                        // Re-parse as raw Value only for entries that have a
+                        // UUID (needed by turn_raw). This avoids cloning every
+                        // parsed Value upfront.
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                            raw.insert(uuid.to_string(), val);
                         }
-                        Err(e) => errors.push((i + 1, format!("{e}"))),
                     }
+                    entries.push(entry);
                 }
                 Err(e) => errors.push((i + 1, format!("{e}"))),
             }
@@ -547,6 +547,18 @@ impl Transcript {
     /// The UUID of the last entry in the transcript that has one.
     pub fn tail(&self) -> Option<&str> {
         self.entries.iter().rev().find_map(|e| e.uuid())
+    }
+
+    /// The UUID of the last User or Assistant entry, ignoring progress and
+    /// system entries which live on side branches of the DAG.  Use this when
+    /// storing a tail UUID for future ancestor-chain comparisons (breadcrumbs,
+    /// git notes) — progress entries share a parent with the next turn's user
+    /// entry and so are never on the next turn's ancestor chain.
+    pub fn conversation_tail(&self) -> Option<&str> {
+        self.entries.iter().rev().find_map(|e| match e {
+            TranscriptEntry::User(c) | TranscriptEntry::Assistant(c) => Some(c.uuid.as_str()),
+            _ => None,
+        })
     }
 
     /// All typed entries in parse order.
@@ -652,6 +664,29 @@ impl Transcript {
         })
     }
 
+    /// Collect user text messages walking ancestors from `tail`, stopping
+    /// before reaching `stop_at` (exclusive).  Returns entries in
+    /// reverse-chronological order (most recent first).  Each item is
+    /// `(uuid, text, plan_content)`.
+    pub fn user_texts_until<'a>(
+        &'a self,
+        tail: &'a str,
+        stop_at: Option<&str>,
+    ) -> Vec<(&'a str, &'a str, Option<&'a str>)> {
+        let mut result = vec![];
+        for entry in self.ancestors(tail) {
+            if stop_at.is_some_and(|s| entry.uuid() == Some(s)) {
+                break;
+            }
+            if let TranscriptEntry::User(conv) = entry {
+                if let MessageContent::Text(t) = &conv.message.content {
+                    result.push((conv.uuid.as_str(), t.as_str(), conv.plan_content.as_deref()));
+                }
+            }
+        }
+        result
+    }
+
     /// Check whether a UUID appears as any user entry in the transcript.
     pub fn uuid_exists(&self, uuid: &str) -> bool {
         self.by_uuid.contains_key(uuid)
@@ -675,6 +710,57 @@ impl Transcript {
             }
         }
         None
+    }
+
+    // ---------------------------------------------------------------
+    // Q&A extraction
+    // ---------------------------------------------------------------
+
+    /// Extract Q&A answer strings from AskUserQuestion interactions in a
+    /// turn.  Collects the user's answer text from tool_result entries that
+    /// match AskUserQuestion tool_use IDs, stripping Claude Code's framing.
+    /// Returns answers in chronological order.
+    pub fn extract_qa(turn: &[&TranscriptEntry]) -> Vec<String> {
+        let mut ask_ids: HashSet<String> = HashSet::new();
+        for block in assistant_blocks(turn) {
+            if let ContentBlock::ToolUse(tu) = block {
+                if tu.name == "AskUserQuestion" {
+                    ask_ids.insert(tu.id.clone());
+                }
+            }
+        }
+        if ask_ids.is_empty() {
+            return Vec::new();
+        }
+        let mut qa = Vec::new();
+        for entry in turn.iter() {
+            if let TranscriptEntry::User(conv) = entry {
+                if let MessageContent::Blocks(blocks) = &conv.message.content {
+                    for block in blocks {
+                        if let ContentBlock::ToolResult(tr) = block {
+                            if ask_ids.contains(&tr.tool_use_id) {
+                                if let Some(text) = tr.content.as_str() {
+                                    let cleaned = text
+                                        .strip_prefix(
+                                            "User has answered your questions: ",
+                                        )
+                                        .unwrap_or(text);
+                                    let cleaned = cleaned
+                                        .strip_suffix(
+                                            ". You can now continue with the user's answers in mind.",
+                                        )
+                                        .unwrap_or(cleaned);
+                                    qa.push(cleaned.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Turn is reverse-chronological; put answers in chronological order.
+        qa.reverse();
+        qa
     }
 
     // ---------------------------------------------------------------
@@ -707,6 +793,9 @@ impl Transcript {
             }
         }
 
+        // Extract Q&A from AskUserQuestion interactions.
+        let qa_lines = Self::extract_qa(turn);
+
         // Messages were collected newest-first; reverse to chronological.
         messages.reverse();
 
@@ -716,17 +805,45 @@ impl Transcript {
             Verbosity::Full => cats.format_detailed(None),
         };
 
+        let qa_section = if qa_lines.is_empty() {
+            None
+        } else {
+            Some(format!("Q&A: {}", qa_lines.join("; ")))
+        };
+
         let messages_section = if messages.is_empty() {
             None
         } else {
             Some(messages.join("\n\n"))
         };
 
-        match (tool_summary, messages_section) {
-            (Some(tools), Some(msgs)) => Some(format!("{tools}\n---\n{msgs}")),
-            (Some(tools), None) => Some(tools),
-            (None, Some(msgs)) => Some(msgs),
-            (None, None) => None,
+        // Assemble sections: tools, Q&A, messages.
+        let mut parts: Vec<&str> = Vec::new();
+        let tool_str;
+        let qa_str;
+        let msg_str;
+
+        if let Some(ref t) = tool_summary {
+            tool_str = t.as_str();
+            parts.push(&tool_str);
+        }
+        if let Some(ref q) = qa_section {
+            qa_str = q.as_str();
+            parts.push(&qa_str);
+        }
+        if let Some(ref m) = messages_section {
+            msg_str = m.as_str();
+            parts.push(&msg_str);
+        }
+
+        if parts.is_empty() {
+            None
+        } else if messages_section.is_some() && parts.len() > 1 {
+            // Put a --- separator before the messages section.
+            let non_msg: Vec<&str> = parts[..parts.len() - 1].to_vec();
+            Some(format!("{}\n---\n{}", non_msg.join("\n"), parts.last().unwrap()))
+        } else {
+            Some(parts.join("\n"))
         }
     }
 
@@ -746,6 +863,7 @@ struct ToolCategories {
     searched: Vec<String>,
     fetched: Vec<String>,
     delegated: Vec<String>,
+    asked: Vec<String>,
 }
 
 impl ToolCategories {
@@ -810,6 +928,15 @@ impl ToolCategories {
                 let label = input["description"].as_str().unwrap_or("(unknown)").to_string();
                 self.push("delegated", label);
             }
+            "AskUserQuestion" => {
+                if let Some(questions) = input["questions"].as_array() {
+                    for q in questions {
+                        if let Some(text) = q["question"].as_str() {
+                            self.push("asked", text.to_string());
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -824,6 +951,7 @@ impl ToolCategories {
             "searched" => &mut self.searched,
             "fetched" => &mut self.fetched,
             "delegated" => &mut self.delegated,
+            "asked" => &mut self.asked,
             _ => return,
         };
         if !vec.contains(&value) {
@@ -855,6 +983,7 @@ impl ToolCategories {
             ("searched", &self.searched),
             ("fetched", &self.fetched),
             ("delegated", &self.delegated),
+            ("asked", &self.asked),
         ]
     }
 
@@ -881,6 +1010,9 @@ impl ToolCategories {
                     }
                     "delegated" => {
                         if count == 1 { "task" } else { "tasks" }
+                    }
+                    "asked" => {
+                        if count == 1 { "question" } else { "questions" }
                     }
                     _ => "items",
                 };

@@ -164,6 +164,72 @@ fn handle_stop_normal_continuation_no_false_reset() {
     assert!(!msg.contains("reset"), "normal continuation should NOT detect reset, got: {msg}");
 }
 
+/// Progress entries (hook_progress, stop_hook_summary) sit on DAG side
+/// branches — they share a parent with the next turn's user entry rather
+/// than being on its ancestor chain.  This test verifies that a nonproductive
+/// stop followed by a productive stop does NOT falsely detect a reset when
+/// the transcript contains progress/system entries between turns.
+#[test]
+fn no_false_reset_with_progress_entries_between_turns() {
+    let repo = temp_git_repo();
+    let cwd = repo.path().to_str().unwrap();
+    let data_dir = repo.path().join(".claudetributer");
+    fs::create_dir_all(&data_dir).unwrap();
+
+    // --- Turn 1 (nonproductive): u1 → a1 → p1 (progress) ---
+    let transcript = tempfile::NamedTempFile::new().unwrap();
+    fs::write(transcript.path(), concat!(
+        r#"{"type":"user","uuid":"u1","isSidechain":false,"userType":"external","cwd":"/tmp","sessionId":"s","timestamp":"t","version":"v","message":{"role":"user","content":"hello"}}"#, "\n",
+        r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","isSidechain":false,"userType":"external","cwd":"/tmp","sessionId":"s","timestamp":"t","version":"v","requestId":"r1","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#, "\n",
+        r#"{"type":"progress","uuid":"p1","parentUuid":"a1","isSidechain":false,"cwd":"/tmp","sessionId":"s","timestamp":"t","version":"v","data":{"type":"hook_progress","hookEvent":"Stop","hookName":"Stop"}}"#, "\n",
+    )).unwrap();
+    fs::write(
+        data_dir.join("prompt-test-session.json"),
+        r#"{"prompt":"hello","session_id":"s","uuid":"u1"}"#,
+    ).unwrap();
+    let common_str = common(cwd, transcript.path().to_str().unwrap());
+    let input = format!(r#"{{ {common_str}, "hook_event_name": "Stop", "stop_hook_active": false }}"#);
+    let (code, stdout, stderr) = run_cli(&input);
+    assert_eq!(code, 0);
+    assert!(stderr.is_empty(), "turn 1 stderr: {stderr}");
+    let out: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let msg = out["systemMessage"].as_str().unwrap();
+    assert!(msg.contains("nonproductive"), "turn 1 should be nonproductive, got: {msg}");
+    // Breadcrumb should store the conversation tail (a1), not the progress entry (p1).
+    let crumb: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(data_dir.join("continuation-test-session.json")).unwrap()
+    ).unwrap();
+    assert_eq!(crumb["tail_uuid"].as_str(), Some("a1"),
+        "breadcrumb should store conversation tail, not progress entry");
+
+    // --- Turn 2 (productive): extends transcript with system + u2 → a2 → p2 ---
+    // Claude Code appends a stop_hook_summary system entry after the first stop,
+    // then the new user prompt branches from a1 (NOT from p1 or the system entry).
+    fs::write(transcript.path(), concat!(
+        r#"{"type":"user","uuid":"u1","isSidechain":false,"userType":"external","cwd":"/tmp","sessionId":"s","timestamp":"t","version":"v","message":{"role":"user","content":"hello"}}"#, "\n",
+        r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","isSidechain":false,"userType":"external","cwd":"/tmp","sessionId":"s","timestamp":"t","version":"v","requestId":"r1","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#, "\n",
+        r#"{"type":"progress","uuid":"p1","parentUuid":"a1","isSidechain":false,"cwd":"/tmp","sessionId":"s","timestamp":"t","version":"v","data":{"type":"hook_progress","hookEvent":"Stop","hookName":"Stop"}}"#, "\n",
+        r#"{"type":"system","uuid":"sys1","parentUuid":"p1","subtype":"stop_hook_summary","cwd":"/tmp","sessionId":"s","timestamp":"t","version":"v"}"#, "\n",
+        r#"{"type":"user","uuid":"u2","parentUuid":"a1","isSidechain":false,"userType":"external","cwd":"/tmp","sessionId":"s","timestamp":"t","version":"v","message":{"role":"user","content":"save it"}}"#, "\n",
+        r#"{"type":"assistant","uuid":"a2","parentUuid":"u2","isSidechain":false,"userType":"external","cwd":"/tmp","sessionId":"s","timestamp":"t","version":"v","requestId":"r2","message":{"role":"assistant","content":[{"type":"text","text":"saved"}]}}"#, "\n",
+        r#"{"type":"progress","uuid":"p2","parentUuid":"a2","isSidechain":false,"cwd":"/tmp","sessionId":"s","timestamp":"t","version":"v","data":{"type":"hook_progress","hookEvent":"Stop","hookName":"Stop"}}"#, "\n",
+    )).unwrap();
+    fs::write(
+        data_dir.join("prompt-test-session.json"),
+        r#"{"prompt":"save it","session_id":"s","uuid":"u2"}"#,
+    ).unwrap();
+    fs::write(repo.path().join("output.txt"), "saved content").unwrap();
+    let common_str = common(cwd, transcript.path().to_str().unwrap());
+    let input = format!(r#"{{ {common_str}, "hook_event_name": "Stop", "stop_hook_active": false }}"#);
+    let (code, stdout, stderr) = run_cli(&input);
+    assert_eq!(code, 0);
+    assert!(stderr.is_empty(), "turn 2 stderr: {stderr}");
+    let out: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let msg = out["systemMessage"].as_str().unwrap();
+    assert!(!msg.contains("reset"), "normal continuation with progress entries should NOT detect reset, got: {msg}");
+    assert!(msg.contains("committed"), "turn 2 should commit, got: {msg}");
+}
+
 // =================================================================
 // Breadcrumb / continuation tests
 // =================================================================

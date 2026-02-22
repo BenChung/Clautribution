@@ -27,3 +27,22 @@ pub struct PlanSnapshot {
     pub prompt: String,
     pub plan: String,
 }
+
+/// Cross-session context for a plan: the original user prompt that initiated
+/// planning and any Q&A interactions that shaped the plan.
+/// Stored as `.claudetributer/plan-context.json` (project-wide, NOT
+/// session-specific) so it survives across the planning→implementation
+/// session boundary.  Consumed and cleared by the productive stop that
+/// commits the plan's implementation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanContext {
+    pub original_prompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub qa: Vec<String>,
+    /// Session ID of the planning session whose Stop hook never fired
+    /// (e.g. ExitPlanMode approval).  The JSONL transcript for that session
+    /// is still on disk; we re-read it at commit time rather than copying
+    /// all the entries into this file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planning_session_id: Option<String>,
+}

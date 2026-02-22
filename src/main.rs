@@ -1,3 +1,4 @@
+mod decision;
 mod metadata;
 mod preferences;
 mod session;

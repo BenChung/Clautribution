@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use crate::metadata::{ContinuationBreadcrumb, PlanSnapshot, PromptMetadata};
-use minijinja::{context, Environment};
+use crate::decision::{decide_stop, StopContext, StopDecision};
+use crate::metadata::{ContinuationBreadcrumb, PlanContext, PlanSnapshot, PromptMetadata};
 use crate::preferences::{CommitTemplate, Preferences};
 use serde::de::DeserializeOwned;
 use std::fs;
@@ -103,6 +103,12 @@ impl Session {
 
     fn pending_plan_path(&self) -> PathBuf {
         self.dir.join(format!("pending-plan-{}.txt", self.session_id))
+    }
+
+    /// Project-wide (NOT session-specific) so it survives across the
+    /// planning→implementation session boundary.
+    fn plan_context_path(&self) -> PathBuf {
+        self.dir.join("plan-context.json")
     }
 
     // ---------------------------------------------------------------
@@ -279,6 +285,46 @@ impl Session {
         }
     }
 
+    fn read_plan_context(&self) -> Result<Option<PlanContext>> {
+        read_json_file(&self.plan_context_path())
+    }
+
+    fn write_plan_context(&self, ctx: &PlanContext) -> Result<()> {
+        let path = self.plan_context_path();
+        let json = serde_json::to_string_pretty(ctx).context("serializing plan context")?;
+        fs::write(&path, json).with_context(|| format!("writing {}", path.display()))
+    }
+
+    fn clear_plan_context(&self) -> Result<()> {
+        remove_if_exists(&self.plan_context_path())
+    }
+
+    /// Read all raw transcript entries from a previous planning session's
+    /// JSONL file.  `current_transcript_path` is used to locate the Claude
+    /// project directory; the planning session file is
+    /// `{dir}/{planning_session_id}.jsonl`.  Returns an empty vec if the
+    /// file cannot be found or parsed.
+    fn read_planning_session_entries(
+        &self,
+        current_transcript_path: &str,
+        planning_session_id: &str,
+    ) -> Result<Vec<serde_json::Value>> {
+        let dir = match std::path::Path::new(current_transcript_path).parent() {
+            Some(d) => d,
+            None => return Ok(vec![]),
+        };
+        let path = dir.join(format!("{planning_session_id}.jsonl"));
+        let path_str = match path.to_str() {
+            Some(s) => s,
+            None => return Ok(vec![]),
+        };
+        let transcript = read_transcript(path_str)?;
+        Ok(match transcript.tail() {
+            Some(tail) => transcript.turn_raw(tail, None),
+            None => vec![],
+        })
+    }
+
     fn read_and_clear_pending_plan(&self) -> Result<Option<String>> {
         let path = self.pending_plan_path();
         match fs::read_to_string(&path) {
@@ -307,14 +353,111 @@ impl Session {
         }
     }
 
-    /// Render a commit message template with the given prompt text.
-    fn render_commit_message(&self, template: &str, prompt: &str) -> Result<String> {
-        let env = Environment::new();
-        let tmpl = env
-            .template_from_str(template)
-            .context("parsing commit message template")?;
-        tmpl.render(context! { prompt })
-            .context("rendering commit message template")
+    // ---------------------------------------------------------------
+    // Cross-session plan context recovery
+    // ---------------------------------------------------------------
+
+    /// Scan the Claude project transcript directory (parent of
+    /// `transcript_path`) for the most recently modified JSONL file that
+    /// belongs to a different session.  If that file contains an
+    /// `ExitPlanMode` tool call — the signal that a plan was built and
+    /// approved — extract the original user prompt, Q&A, and the planning
+    /// session ID and return them as a `PlanContext`.
+    ///
+    /// Only the session ID is stored; the transcript entries are re-read
+    /// from the existing JSONL at commit time rather than copying them into
+    /// a separate file.
+    ///
+    /// This covers the case where the Stop hook never fires for the planning
+    /// session because Claude Code transitions to the implementation session
+    /// via an immediate /clear when the plan is approved.
+    fn recover_plan_context(
+        &self,
+        transcript_path: &str,
+    ) -> Result<Option<crate::metadata::PlanContext>> {
+        let transcript_file = std::path::Path::new(transcript_path);
+        let dir = match transcript_file.parent() {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        let current_filename = format!("{}.jsonl", self.session_id);
+
+        let mut candidates: Vec<_> = Vec::new();
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let filename = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if filename == current_filename {
+                    continue;
+                }
+                if let Ok(meta) = entry.metadata() {
+                    if let Ok(modified) = meta.modified() {
+                        candidates.push((modified, path));
+                    }
+                }
+            }
+        }
+        // Most recently modified first.
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
+        for (_, path) in candidates.iter().take(3) {
+            let path_str = match path.to_str() {
+                Some(s) => s,
+                None => continue,
+            };
+            // Derive the planning session ID from the filename (strip ".jsonl").
+            let planning_session_id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            if planning_session_id.is_empty() {
+                continue;
+            }
+            let transcript = read_transcript(path_str)?;
+            let tail = match transcript.tail() {
+                Some(t) => t,
+                None => continue,
+            };
+            if transcript.find_exit_plan_mode_plan(tail, None).is_none() {
+                continue;
+            }
+            // Find the original user prompt: prefer the first post-commit
+            // user text over the plan-mode trigger (e.g. "do it in plan
+            // mode").  The committed tail marks where the last productive
+            // commit ended; user texts after that point are the planning
+            // discussion.
+            let committed_tail = self
+                .head_oid()
+                .and_then(|oid| self.read_note("refs/notes/tail", oid));
+            let user_texts =
+                transcript.user_texts_until(tail, committed_tail.as_deref());
+            let original_prompt = if user_texts.len() >= 2 {
+                // Skip the plan-mode trigger (first = most recent); use
+                // the chronologically earliest post-commit user text.
+                user_texts.last().unwrap().1.to_string()
+            } else {
+                match user_texts.first() {
+                    Some((_, text, _)) if !text.is_empty() => text.to_string(),
+                    _ => continue,
+                }
+            };
+            let turn = transcript.turn(tail, None);
+            let qa = Transcript::extract_qa(&turn);
+            return Ok(Some(crate::metadata::PlanContext {
+                original_prompt,
+                qa,
+                planning_session_id: Some(planning_session_id),
+            }));
+        }
+        Ok(None)
     }
 
     // ---------------------------------------------------------------
@@ -329,6 +472,27 @@ impl Session {
         if input.source != SessionStartSource::Startup {
             self.clear_prompt_metadata()?;
             self.clear_breadcrumb()?;
+        }
+
+        // When Claude Code approves a plan via ExitPlanMode it immediately
+        // creates a new implementation session via /clear.  The planning
+        // session's Stop hook never fires in that transition, so plan-context
+        // and plan-entries are never persisted through the normal nonproductive
+        // Stop path.  Recover them here from the previous session's JSONL.
+        if input.source == SessionStartSource::Clear && self.read_plan_context()?.is_none() {
+            if let Some(context) =
+                self.recover_plan_context(&input.common.transcript_path)?
+            {
+                let preview = context
+                    .original_prompt
+                    .chars()
+                    .take(60)
+                    .collect::<String>();
+                self.write_plan_context(&context)?;
+                warnings.push(format!(
+                    "recovered plan context from planning session ({preview:?})"
+                ));
+            }
         }
 
         if let Ok(head) = self.repo.head() {
@@ -402,148 +566,88 @@ impl Session {
     pub fn handle_stop(&self, input: &StopInput) -> Result<Option<HookOutput>> {
         let transcript = read_transcript(&input.common.transcript_path)?;
 
-        // Derive prompt metadata. Normally written by UserPromptSubmit, but
-        // plan-injected implementation prompts bypass that hook entirely.
-        // Fallback chain:
-        //   1. Prompt metadata file (written by UserPromptSubmit)
-        //   2. Pending plan file (written by a preceding plan-mode nonproductive stop)
-        //   3. Last user text in the transcript (covers plan implementation prompts
-        //      where Claude Code clears the session before Stop fires for ExitPlanMode)
-        let mut meta = if let Some(m) = self.read_prompt_metadata()? {
-            m
-        } else if let Some(plan) = self.read_pending_plan()? {
-            let prompt = plan
-                .lines()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or("Implement plan")
-                .to_string();
-            PromptMetadata {
-                prompt,
-                session_id: self.session_id.clone(),
-                uuid: None,
-            }
-        } else if let Some((uuid, text, plan_content)) = transcript.last_user_text() {
-            // Write the plan to the pending plan file so the productive stop
-            // path includes it in the commit message.
-            if let Some(plan) = plan_content {
-                self.write_pending_plan(plan)?;
-            }
-            PromptMetadata {
-                prompt: text.to_string(),
-                session_id: self.session_id.clone(),
-                uuid: Some(uuid.to_string()),
-            }
-        } else {
-            return Ok(None);
-        };
-
-        // Always re-resolve the UUID from the transcript. At prompt-submit
-        // time the new entry may not have been written yet, and if the same
-        // prompt text was submitted again we need the *latest* UUID, not the
-        // one from a previous turn.
-        if let Some(uuid) = transcript.find_user_prompt(&meta.prompt) {
-            if meta.uuid.as_deref() != Some(uuid) {
-                meta.uuid = Some(uuid.to_string());
-                let path = self.prompt_path();
-                let json =
-                    serde_json::to_string_pretty(&meta).context("serializing prompt metadata")?;
-                fs::write(&path, json)
-                    .with_context(|| format!("updating {}", path.display()))?;
-            }
-        }
-
-        let tail_uuid = match transcript.tail() {
-            Some(uuid) => uuid,
-            None => return Ok(None),
-        };
-
-        let head_oid = self.head_oid();
-
-        // --- Reset detection ---
-        // Prefer the breadcrumb tail (covers nonproductive gaps); fall back to
-        // refs/notes/tail on HEAD (covers the case where no breadcrumb exists yet).
-        let mut hints: Vec<String> = Vec::new();
-        let breadcrumb = self.read_breadcrumb()?;
-        let prev_tail: Option<String> = breadcrumb
+        // --- Gather all I/O-derived state ---
+        let plan_context = self.read_plan_context()?;
+        // If a planning session ID was stored, re-read its JSONL transcript
+        // now (at commit time) to obtain the planning entries for the note.
+        let plan_entries = match plan_context
             .as_ref()
-            .map(|b| b.tail_uuid.clone())
-            .or_else(|| head_oid.and_then(|oid| self.read_note("refs/notes/tail", oid)));
-
-        if let Some(ref pt) = prev_tail {
-            if transcript.uuid_exists(pt) && !transcript.is_ancestor(tail_uuid, pt) {
-                hints.push("reset detected (conversation branched from earlier point)".into());
+            .and_then(|pc| pc.planning_session_id.as_deref())
+        {
+            Some(sid) => {
+                self.read_planning_session_entries(&input.common.transcript_path, sid)?
             }
-        }
+            None => vec![],
+        };
+        let ctx = StopContext {
+            transcript: &transcript,
+            file_metadata: self.read_prompt_metadata()?,
+            pending_plan: self.read_pending_plan()?,
+            plan_context,
+            plan_entries,
+            session_id: &self.session_id,
+            breadcrumb: self.read_breadcrumb()?,
+            committed_tail: self
+                .head_oid()
+                .and_then(|oid| self.read_note("refs/notes/tail", oid)),
+            has_uncommitted_changes: self.has_uncommitted_changes()?,
+            commit_template: &self.load_commit_template()?,
+            verbosity: self.prefs.summary_verbosity(),
+        };
 
-        // --- Nonproductive stop: leave a breadcrumb and return ---
-        if !self.has_uncommitted_changes()? {
-            // Capture a plan snapshot if this turn finalized a plan via
-            // ExitPlanMode. We check unconditionally because the permission
-            // mode in the Stop event may have already transitioned away from
-            // Plan by the time the stop fires.
-            if let Some(plan) =
-                transcript.find_exit_plan_mode_plan(tail_uuid, meta.uuid.as_deref())
-            {
-                self.append_plan_snapshot(&meta.prompt, &plan)?;
-                self.write_pending_plan(&plan)?;
-                hints.push("plan snapshot saved".into());
+        // --- Decide (pure) ---
+        let decision = decide_stop(&ctx).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        // --- Execute ---
+        match decision {
+            StopDecision::NoMetadata | StopDecision::NoTail => Ok(None),
+            StopDecision::Nonproductive {
+                hint_message,
+                breadcrumb,
+                plan_snapshot,
+                pending_plan,
+                plan_context,
+            } => {
+                if let Some((prompt, plan)) = plan_snapshot {
+                    self.append_plan_snapshot(&prompt, &plan)?;
+                }
+                if let Some(plan) = pending_plan {
+                    self.write_pending_plan(&plan)?;
+                }
+                if let Some(pc) = plan_context {
+                    self.write_plan_context(&pc)?;
+                }
+                self.write_breadcrumb(&breadcrumb)?;
+                Ok(hint(hint_message))
             }
-
-            self.write_breadcrumb(&ContinuationBreadcrumb {
-                tail_uuid: tail_uuid.to_string(),
-                session_id: meta.session_id.clone(),
-            })?;
-            let mut msg = "[claudtributter] nonproductive turn recorded".to_string();
-            if !hints.is_empty() {
-                msg = format!(
-                    "[claudtributter] {}, nonproductive turn recorded",
-                    hints.join(", ")
+            StopDecision::Productive {
+                hint_message,
+                commit_message,
+                transcript_note_entries,
+                simple_notes,
+                consumed_pending_plan,
+                consumed_plan_context,
+            } => {
+                if consumed_pending_plan {
+                    self.read_and_clear_pending_plan()?;
+                }
+                if consumed_plan_context {
+                    self.clear_plan_context()?;
+                }
+                let oid = self.commit_changes(&commit_message)?;
+                let json = serde_json::to_string_pretty(&transcript_note_entries)
+                    .context("serializing transcript")?;
+                let mut notes: Vec<(&str, &str)> = vec![("refs/notes/transcript", &json)];
+                notes.extend(
+                    simple_notes
+                        .iter()
+                        .map(|(r, c)| (r.as_str(), c.as_str())),
                 );
+                self.write_notes(oid, &notes)?;
+                self.clear_breadcrumb()?;
+                Ok(hint(hint_message))
             }
-            return Ok(hint(msg));
         }
-
-        // --- Productive stop: commit, expand transcript, write notes, clear breadcrumb ---
-
-        // The turn summary (for the commit message body) covers only the current
-        // prompt→tail span.
-        let turn = transcript.turn(tail_uuid, meta.uuid.as_deref());
-        let turn_summary = Transcript::summarize_turn(&turn, self.prefs.summary_verbosity());
-
-        // The transcript note covers the full span since the last committed tail.
-        let committed_tail = head_oid.and_then(|oid| self.read_note("refs/notes/tail", oid));
-        let chain_values = transcript.turn_raw(tail_uuid, committed_tail.as_deref());
-
-        let tmpl = self.load_commit_template()?;
-        let mut msg = self.render_commit_message(&tmpl, &meta.prompt)?;
-        if let Some(plan) = self.read_and_clear_pending_plan()? {
-            msg.push_str("\n\n## Plan\n\n");
-            msg.push_str(&plan);
-        }
-        if let Some(summary) = &turn_summary {
-            msg.push_str("\n\n");
-            msg.push_str(summary);
-        }
-        let commit_oid = self.commit_changes(&msg)?;
-        hints.push("committed changes".into());
-
-        let transcript_json =
-            serde_json::to_string_pretty(&chain_values).context("serializing transcript")?;
-
-        self.write_notes(
-            commit_oid,
-            &[
-                ("refs/notes/transcript", &transcript_json),
-                ("refs/notes/prompt", &meta.prompt),
-                ("refs/notes/session", &meta.session_id),
-                ("refs/notes/tail", tail_uuid),
-            ],
-        )?;
-
-        self.clear_breadcrumb()?;
-
-        hints.push(format!("attached notes ({} transcript entries)", chain_values.len()));
-        Ok(hint(format!("[claudtributter] {}", hints.join(", "))))
     }
 
     pub fn handle_session_end(&self, _input: &SessionEndInput) -> Result<Option<HookOutput>> {
