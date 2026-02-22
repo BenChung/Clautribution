@@ -168,6 +168,36 @@ fn plan_prompt(plan: &str) -> String {
         .unwrap_or_else(|| "Implement plan".to_string())
 }
 
+/// Prompts above this byte threshold are too large for a commit
+/// message.  The full text is moved to a `refs/notes/prompt-full`
+/// git note and the commit message uses a short summary instead.
+const PROMPT_SIZE_LIMIT: usize = 4096;
+
+/// If `prompt` exceeds the size limit, return a short summary for the
+/// commit message and the full text for a separate git note.
+fn split_long_prompt(prompt: &str) -> (String, Option<String>) {
+    if prompt.len() <= PROMPT_SIZE_LIMIT {
+        return (prompt.to_string(), None);
+    }
+    let first_line = prompt.lines().next().unwrap_or(prompt).trim();
+    let summary = if first_line.len() > 200 {
+        // Find the last char boundary at or before 200 bytes.
+        let mut end = 200;
+        while end > 0 && !first_line.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!(
+            "{}... [full prompt in refs/notes/prompt-full]",
+            &first_line[..end]
+        )
+    } else {
+        format!(
+            "{first_line} [full prompt in refs/notes/prompt-full]"
+        )
+    };
+    (summary, Some(prompt.to_string()))
+}
+
 fn resolve_metadata(ctx: &StopContext) -> Option<ResolvedMetadata> {
     // Source 1: prompt metadata file (written by UserPromptSubmit).
     if let Some(m) = &ctx.file_metadata {
@@ -343,8 +373,11 @@ fn build_productive(
         .map(|pc| pc.original_prompt.as_str())
         .unwrap_or(prompt);
 
+    // Split out pasted content (large prompts) into a separate note.
+    let (commit_prompt, full_prompt) = split_long_prompt(effective_prompt);
+
     // Render commit message.
-    let mut msg = render_commit_message(ctx.commit_template, effective_prompt)?;
+    let mut msg = render_commit_message(ctx.commit_template, &commit_prompt)?;
 
     // Determine whether to consume the pending plan (either from ctx or fallback).
     let has_pending_plan = ctx.pending_plan.is_some() || pending_plan_from_fallback.is_some();
@@ -390,11 +423,14 @@ fn build_productive(
         chain_values.len()
     ));
 
-    let simple_notes = vec![
-        ("refs/notes/prompt".to_string(), effective_prompt.to_string()),
+    let mut simple_notes = vec![
+        ("refs/notes/prompt".to_string(), commit_prompt),
         ("refs/notes/session".to_string(), session_id.to_string()),
         ("refs/notes/tail".to_string(), conv_tail.to_string()),
     ];
+    if let Some(full) = full_prompt {
+        simple_notes.push(("refs/notes/prompt-full".to_string(), full));
+    }
 
     Ok(StopDecision::Productive {
         hint_message: format!("[claudtributter] {}", hints.join(", ")),
