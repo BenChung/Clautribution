@@ -1,0 +1,6 @@
+{
+  "name": "claudtributter",
+  "description": "Automatic git commits with rich metadata for every Claude Code turn",
+  "version": "0.1.0",
+  "hooks": "./hooks/hooks.json"
+}
