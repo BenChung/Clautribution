@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/claudtributter",
+            "command": "${CLAUDE_PLUGIN_ROOT}/target/release/claudtributter",
             "timeout": 30
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/claudtributter",
+            "command": "${CLAUDE_PLUGIN_ROOT}/target/release/claudtributter",
             "timeout": 30
           }
         ]
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/claudtributter",
+            "command": "${CLAUDE_PLUGIN_ROOT}/target/release/claudtributter",
             "timeout": 30
           }
         ]
@@ -42,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/claudtributter",
+            "command": "${CLAUDE_PLUGIN_ROOT}/target/release/claudtributter",
             "timeout": 30
           }
         ]
