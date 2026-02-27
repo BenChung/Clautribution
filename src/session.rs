@@ -550,17 +550,23 @@ impl Session {
 
         let transcript = read_transcript(&input.common.transcript_path)?;
 
-        let is_new = self.read_prompt_metadata()?.is_none();
+        if self.read_prompt_metadata()?.is_some() {
+            // A previous prompt was being tracked but never reached a
+            // productive Stop (e.g. the user interrupted and reprompted).
+            // Write a breadcrumb for transcript continuity, then overwrite
+            // the metadata with the new prompt.  Earlier prompts are
+            // recovered from the transcript at commit time.
+            if let Some(conv_tail) = transcript.conversation_tail() {
+                self.write_breadcrumb(&ContinuationBreadcrumb {
+                    tail_uuid: conv_tail.to_string(),
+                    session_id: self.session_id.clone(),
+                })?;
+            }
+        }
 
-        // Always write metadata — even if the prompt text is identical to the
-        // previous submission, this is a new turn and we need a fresh UUID.
         self.write_prompt_metadata(input, &transcript)?;
 
-        if is_new {
-            Ok(hint("[claudtributter] tracking prompt".into()))
-        } else {
-            Ok(hint("[claudtributter] tracking new prompt".into()))
-        }
+        Ok(hint("[claudtributter] tracking prompt".into()))
     }
 
     pub fn handle_stop(&self, input: &StopInput) -> Result<Option<HookOutput>> {

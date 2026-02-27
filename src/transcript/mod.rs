@@ -780,13 +780,38 @@ impl Transcript {
         let mut messages: Vec<String> = Vec::new();
 
         // Walk in reverse-chronological order (turn entries come newest-first).
-        for block in assistant_blocks(turn) {
-            match block {
-                ContentBlock::ToolUse(tu) => cats.categorize(&tu.name, &tu.input),
-                ContentBlock::Text(t) => {
-                    let trimmed = t.text.trim();
-                    if !trimmed.is_empty() {
-                        messages.push(trimmed.to_string());
+        // Include user prompts as > quoted text so the full conversation flow
+        // is visible — including interrupted/cancelled prompts.
+        for entry in turn.iter() {
+            match entry {
+                TranscriptEntry::User(conv) => {
+                    // Skip auto-injected plan scaffolding (has plan_content).
+                    if conv.plan_content.is_some() {
+                        continue;
+                    }
+                    if let MessageContent::Text(t) = &conv.message.content {
+                        let trimmed = t.trim();
+                        if !trimmed.is_empty() {
+                            messages.push(format!("> {trimmed}"));
+                        }
+                    }
+                }
+                TranscriptEntry::Assistant(conv) => {
+                    if let MessageContent::Blocks(blocks) = &conv.message.content {
+                        for block in blocks {
+                            match block {
+                                ContentBlock::ToolUse(tu) => {
+                                    cats.categorize(&tu.name, &tu.input);
+                                }
+                                ContentBlock::Text(t) => {
+                                    let trimmed = t.text.trim();
+                                    if !trimmed.is_empty() {
+                                        messages.push(trimmed.to_string());
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
                 _ => {}

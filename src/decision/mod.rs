@@ -344,14 +344,10 @@ fn build_productive(
     conv_tail: &str,
     prompt: &str,
     session_id: &str,
-    prompt_uuid: Option<&str>,
+    _prompt_uuid: Option<&str>,
     hints: &mut Vec<String>,
     pending_plan_from_fallback: Option<String>,
 ) -> Result<StopDecision, DecisionError> {
-    // Turn summary (for the commit message body) covers only current prompt→tail span.
-    let turn = ctx.transcript.turn(tail_uuid, prompt_uuid);
-    let turn_summary = Transcript::summarize_turn(&turn, ctx.verbosity);
-
     // Transcript note: planning session entries (if recovered) followed by
     // the full implementation span since the last committed tail.
     let impl_entries = ctx
@@ -364,6 +360,17 @@ fn build_productive(
     } else {
         impl_entries
     };
+
+    // Full implementation span (committed_tail→tail) — used for Q&A
+    // extraction and the turn summary.  The wider span ensures we capture
+    // content from intervening nonproductive turns and interrupted prompts.
+    let impl_turn = ctx
+        .transcript
+        .turn(tail_uuid, ctx.committed_tail.as_deref());
+
+    // Turn summary covers the full committed_tail→tail span so interrupted
+    // prompts and their partial responses appear naturally in the flow.
+    let turn_summary = Transcript::summarize_turn(&impl_turn, ctx.verbosity);
 
     // If a cross-session plan context exists, prefer its original prompt
     // over the plan-title fallback — it's the user's actual words.
@@ -385,15 +392,6 @@ fn build_productive(
         .pending_plan
         .as_deref()
         .or(pending_plan_from_fallback.as_deref());
-
-    // Include Q&A from the planning session (cross-session context) or
-    // from the full implementation span (committed_tail→tail).  Using the
-    // wider span instead of just the current prompt→tail turn ensures we
-    // capture Q&A from intervening nonproductive turns (e.g. an
-    // AskUserQuestion turn that produced no file changes).
-    let impl_turn = ctx
-        .transcript
-        .turn(tail_uuid, ctx.committed_tail.as_deref());
     let qa: Vec<String> = ctx
         .plan_context
         .as_ref()
@@ -401,6 +399,18 @@ fn build_productive(
         .map(|pc| pc.qa.clone())
         .unwrap_or_else(|| Transcript::extract_qa(&impl_turn));
 
+    // Collect earlier user prompts for the git notes (refs/notes/prompt).
+    let all_user_texts = ctx
+        .transcript
+        .user_texts_until(tail_uuid, ctx.committed_tail.as_deref());
+    let earlier_prompts: Vec<&str> = all_user_texts
+        .iter()
+        .filter(|(_, text, plan_content)| {
+            plan_content.is_none() && *text != prompt && *text != effective_prompt
+        })
+        .map(|(_, text, _)| *text)
+        .rev()
+        .collect();
     if !qa.is_empty() {
         msg.push_str("\n\n## Q&A\n\n");
         for line in &qa {
@@ -423,8 +433,19 @@ fn build_productive(
         chain_values.len()
     ));
 
+    let prompt_note = if earlier_prompts.is_empty() {
+        commit_prompt
+    } else {
+        let mut note = String::new();
+        for p in &earlier_prompts {
+            note.push_str(p);
+            note.push_str("\n---\n");
+        }
+        note.push_str(&commit_prompt);
+        note
+    };
     let mut simple_notes = vec![
-        ("refs/notes/prompt".to_string(), commit_prompt),
+        ("refs/notes/prompt".to_string(), prompt_note),
         ("refs/notes/session".to_string(), session_id.to_string()),
         ("refs/notes/tail".to_string(), conv_tail.to_string()),
     ];

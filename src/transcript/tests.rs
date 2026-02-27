@@ -688,8 +688,11 @@ fn summarize_turn_empty() {
     let contents = lines.iter().map(|v| serde_json::to_string(v).unwrap()).collect::<Vec<_>>().join("\n");
     let (transcript, _) = Transcript::parse(&contents);
     let turn = transcript.turn("u1", None);
-    // User-only turn: no assistant entries → None
-    assert!(Transcript::summarize_turn(&turn, Verbosity::Short).is_none());
+    // User-only turn: user message is included in the flow.
+    assert_eq!(
+        Transcript::summarize_turn(&turn, Verbosity::Short),
+        Some("> hello".to_string()),
+    );
 }
 
 #[test]
