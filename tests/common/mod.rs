@@ -2,7 +2,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 pub fn run_cli(stdin_json: &str) -> (i32, String, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_claudtributter"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_clautribution"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

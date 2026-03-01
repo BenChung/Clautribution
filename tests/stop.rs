@@ -15,7 +15,7 @@ fn handle_stop() {
         r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","isSidechain":false,"userType":"external","cwd":"/tmp","sessionId":"s","timestamp":"t","version":"v","requestId":"r1","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#, "\n",
     )).unwrap();
     // Write prompt.json so handle_stop finds it.
-    let data_dir = repo.path().join(".claudetributer");
+    let data_dir = repo.path().join(".clautribution");
     fs::create_dir_all(&data_dir).unwrap();
     fs::write(
         data_dir.join("prompt-test-session.json"),
@@ -66,7 +66,7 @@ fn handle_stop_detects_reset() {
         r#"{"type":"user","uuid":"u1","isSidechain":false,"userType":"external","cwd":"/tmp","sessionId":"s","timestamp":"t","version":"v","message":{"role":"user","content":"hello"}}"#, "\n",
         r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","isSidechain":false,"userType":"external","cwd":"/tmp","sessionId":"s","timestamp":"t","version":"v","requestId":"r1","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#, "\n",
     )).unwrap();
-    let data_dir = repo.path().join(".claudetributer");
+    let data_dir = repo.path().join(".clautribution");
     fs::create_dir_all(&data_dir).unwrap();
     fs::write(
         data_dir.join("prompt-test-session.json"),
@@ -127,7 +127,7 @@ fn handle_stop_normal_continuation_no_false_reset() {
         r#"{"type":"user","uuid":"u1","isSidechain":false,"userType":"external","cwd":"/tmp","sessionId":"s","timestamp":"t","version":"v","message":{"role":"user","content":"hello"}}"#, "\n",
         r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","isSidechain":false,"userType":"external","cwd":"/tmp","sessionId":"s","timestamp":"t","version":"v","requestId":"r1","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#, "\n",
     )).unwrap();
-    let data_dir = repo.path().join(".claudetributer");
+    let data_dir = repo.path().join(".clautribution");
     fs::create_dir_all(&data_dir).unwrap();
     fs::write(
         data_dir.join("prompt-test-session.json"),
@@ -173,7 +173,7 @@ fn handle_stop_normal_continuation_no_false_reset() {
 fn no_false_reset_with_progress_entries_between_turns() {
     let repo = temp_git_repo();
     let cwd = repo.path().to_str().unwrap();
-    let data_dir = repo.path().join(".claudetributer");
+    let data_dir = repo.path().join(".clautribution");
     fs::create_dir_all(&data_dir).unwrap();
 
     // --- Turn 1 (nonproductive): u1 → a1 → p1 (progress) ---
@@ -243,7 +243,7 @@ fn nonproductive_stop_writes_breadcrumb_no_notes() {
         r#"{"type":"user","uuid":"u1","isSidechain":false,"userType":"external","cwd":"/tmp","sessionId":"s","timestamp":"t","version":"v","message":{"role":"user","content":"hello"}}"#, "\n",
         r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","isSidechain":false,"userType":"external","cwd":"/tmp","sessionId":"s","timestamp":"t","version":"v","requestId":"r1","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#, "\n",
     )).unwrap();
-    let data_dir = repo.path().join(".claudetributer");
+    let data_dir = repo.path().join(".clautribution");
     fs::create_dir_all(&data_dir).unwrap();
     fs::write(
         data_dir.join("prompt-test-session.json"),
@@ -277,7 +277,7 @@ fn nonproductive_stop_writes_breadcrumb_no_notes() {
 fn productive_stop_flushes_breadcrumb_with_expanded_transcript() {
     let repo = temp_git_repo();
     let cwd = repo.path().to_str().unwrap();
-    let data_dir = repo.path().join(".claudetributer");
+    let data_dir = repo.path().join(".clautribution");
     fs::create_dir_all(&data_dir).unwrap();
 
     // --- Nonproductive turn: u1→a1, no file changes ---
@@ -344,7 +344,7 @@ fn productive_stop_flushes_breadcrumb_with_expanded_transcript() {
 fn reset_detected_via_breadcrumb() {
     let repo = temp_git_repo();
     let cwd = repo.path().to_str().unwrap();
-    let data_dir = repo.path().join(".claudetributer");
+    let data_dir = repo.path().join(".clautribution");
     fs::create_dir_all(&data_dir).unwrap();
 
     // --- Nonproductive turn: u1→a1 ---

@@ -324,10 +324,10 @@ fn build_nonproductive(
     };
 
     let hint_message = if hints.is_empty() {
-        "[claudtributter] nonproductive turn recorded".to_string()
+        "[clautribution] nonproductive turn recorded".to_string()
     } else {
         format!(
-            "[claudtributter] {}, nonproductive turn recorded",
+            "[clautribution] {}, nonproductive turn recorded",
             hints.join(", ")
         )
     };
@@ -461,7 +461,7 @@ fn build_productive(
     }
 
     Ok(StopDecision::Productive {
-        hint_message: format!("[claudtributter] {}", hints.join(", ")),
+        hint_message: format!("[clautribution] {}", hints.join(", ")),
         commit_message: msg,
         transcript_note_entries: chain_values,
         simple_notes,

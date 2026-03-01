@@ -23,5 +23,5 @@ fn handle_session_start() {
         output["systemMessage"].as_str().unwrap().contains("feature branch"),
         "expected branch warning, got: {stdout}"
     );
-    assert!(repo.path().join(".claudetributer").is_dir());
+    assert!(repo.path().join(".clautribution").is_dir());
 }

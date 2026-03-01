@@ -1,8 +1,8 @@
 ---
 name: preview
-description: Preview the commit message claudtributter would generate
+description: Preview the commit message clautribution would generate
 disable-model-invocation: true
-allowed-tools: Bash(*/claudtributter *)
+allowed-tools: Bash(*/clautribution *)
 ---
 
 Preview invoked.

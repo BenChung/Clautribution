@@ -24,5 +24,5 @@ jobs:
       - run: make package
       - uses: actions/upload-artifact@v4
         with:
-          name: claudtributter-plugin
-          path: dist/claudtributter-plugin.zip
+          name: clautribution-plugin
+          path: dist/clautribution-plugin.zip

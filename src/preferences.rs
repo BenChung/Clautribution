@@ -5,14 +5,14 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-const FILENAME: &str = "claudtributter.toml";
+const FILENAME: &str = "clautribution.toml";
 
 const DEFAULT_WARN_BRANCHES: &[&str] = &[
     "main", "master", "develop", "dev", "staging", "production", "prod", "release", "trunk",
 ];
 
 /// Commit message template: either an inline Jinja2 string or a path to a
-/// template file (relative to `.claudetributer/`).
+/// template file (relative to `.clautribution/`).
 ///
 /// In TOML this looks like one of:
 ///
@@ -30,7 +30,7 @@ const DEFAULT_WARN_BRANCHES: &[&str] = &[
 pub enum CommitTemplate {
     /// An inline Jinja2 template string.
     Inline(String),
-    /// Path to a template file (relative to `.claudetributer/`).
+    /// Path to a template file (relative to `.clautribution/`).
     File(String),
 }
 
@@ -40,7 +40,7 @@ impl Default for CommitTemplate {
     }
 }
 
-/// User-facing preferences stored in `.claudetributer/claudtributter.toml`.
+/// User-facing preferences stored in `.clautribution/clautribution.toml`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Preferences {
     /// Controls how much tool detail appears in commit message summaries.
@@ -52,7 +52,7 @@ pub struct Preferences {
     #[serde(default)]
     pub commit_template: CommitTemplate,
 
-    /// Branches that trigger a warning when claudtributter is active.
+    /// Branches that trigger a warning when clautribution is active.
     #[serde(default = "default_warn_branches")]
     pub warn_branches: Vec<String>,
 }
@@ -76,7 +76,7 @@ impl Default for Preferences {
 }
 
 impl Preferences {
-    /// Load preferences from `.claudetributer/claudtributter.toml`.
+    /// Load preferences from `.clautribution/clautribution.toml`.
     ///
     /// If the file doesn't exist it is created with defaults. Missing keys
     /// in an existing file are filled in with defaults via serde.

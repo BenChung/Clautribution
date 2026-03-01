@@ -77,20 +77,20 @@ fn run_drop(cwd: &str) -> Result<()> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    // Subcommand dispatch: `claudtributter preview <cwd>`
-    //                      `claudtributter drop <cwd>`
+    // Subcommand dispatch: `clautribution preview <cwd>`
+    //                      `clautribution drop <cwd>`
     if args.len() >= 2 {
         let result = match args[1].as_str() {
             "preview" => {
                 if args.len() < 3 {
-                    eprintln!("usage: claudtributter preview <cwd>");
+                    eprintln!("usage: clautribution preview <cwd>");
                     process::exit(1);
                 }
                 run_preview(&args[2])
             }
             "drop" => {
                 if args.len() < 3 {
-                    eprintln!("usage: claudtributter drop <cwd>");
+                    eprintln!("usage: clautribution drop <cwd>");
                     process::exit(1);
                 }
                 run_drop(&args[2])
@@ -103,7 +103,7 @@ fn main() {
         match result {
             Ok(()) => {}
             Err(err) => {
-                eprintln!("claudtributter: {err:#}");
+                eprintln!("clautribution: {err:#}");
                 process::exit(2);
             }
         }
@@ -114,7 +114,7 @@ fn main() {
     match run_hook() {
         Ok(()) => {}
         Err(err) => {
-            eprintln!("claudtributter: {err:#}");
+            eprintln!("clautribution: {err:#}");
             process::exit(2);
         }
     }

@@ -1,5 +1,5 @@
 //! End-to-end tests that run real Claude Code sessions against the built
-//! claudtributter binary. These are disabled by default because they:
+//! clautribution binary. These are disabled by default because they:
 //!
 //! - Require a valid `ANTHROPIC_API_KEY` (or active Claude Code auth)
 //! - Make real API calls (costs money)
@@ -29,7 +29,7 @@ fn model() -> String {
 }
 
 /// Create a temp directory with an initialized git repo, `.gitignore`, and
-/// a hook settings file pointing at the built claudtributter binary.
+/// a hook settings file pointing at the built clautribution binary.
 struct TestRepo {
     dir: tempfile::TempDir,
     session_id: String,
@@ -45,8 +45,8 @@ impl TestRepo {
         config.set_str("user.name", "E2E Test").unwrap();
         config.set_str("user.email", "e2e@test.com").unwrap();
 
-        // Ignore .claudetributer so the hook can create its state files.
-        fs::write(dir.path().join(".gitignore"), ".claudetributer\n").unwrap();
+        // Ignore .clautribution so the hook can create its state files.
+        fs::write(dir.path().join(".gitignore"), ".clautribution\n").unwrap();
 
         // Create a seed file and initial commit.
         fs::write(dir.path().join("README.md"), "# test repo\n").unwrap();
@@ -61,8 +61,8 @@ impl TestRepo {
         repo.commit(Some("HEAD"), &sig, &sig, "initial commit", &tree, &[])
             .unwrap();
 
-        // Write a project settings file that registers claudtributter hooks.
-        let binary = env!("CARGO_BIN_EXE_claudtributter");
+        // Write a project settings file that registers clautribution hooks.
+        let binary = env!("CARGO_BIN_EXE_clautribution");
         let claude_dir = dir.path().join(".claude");
         fs::create_dir_all(&claude_dir).unwrap();
         let settings = serde_json::json!({
@@ -108,7 +108,7 @@ impl TestRepo {
     }
 
     fn data_dir(&self) -> PathBuf {
-        self.dir.path().join(".claudetributer")
+        self.dir.path().join(".clautribution")
     }
 
     /// Base args shared by all claude invocations.
@@ -185,7 +185,7 @@ impl TestRepo {
 // Tests — all gated behind CLAUDE_E2E=1
 // =================================================================
 
-/// Basic productive stop: Claude creates a file, claudtributter commits it
+/// Basic productive stop: Claude creates a file, clautribution commits it
 /// and attaches notes.
 #[test]
 #[ignore]
@@ -201,7 +201,7 @@ fn productive_stop_creates_commit_with_notes() {
     eprintln!("exit={code}\nstdout={stdout}\nstderr={stderr}");
     assert_eq!(code, 0, "claude exited with code {code}\nstderr: {stderr}");
 
-    // claudtributter should have committed the file.
+    // clautribution should have committed the file.
     assert!(
         repo.commit_count() > 1,
         "expected more than the initial commit, got {}",

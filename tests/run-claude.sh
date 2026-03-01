@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch claude with the claudtributter plugin loaded.
+# Launch claude with the clautribution plugin loaded.
 # Run from tests/interactive/ (or any test repo).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

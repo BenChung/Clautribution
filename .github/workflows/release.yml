@@ -11,13 +11,13 @@ jobs:
         include:
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            binary: claudtributter
+            binary: clautribution
           - runner: macos-latest
             target: aarch64-apple-darwin
-            binary: claudtributter
+            binary: clautribution
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
-            binary: claudtributter.exe
+            binary: clautribution.exe
 
     runs-on: ${{ matrix.runner }}
     steps:
@@ -39,7 +39,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           tag="${GITHUB_REF_NAME}"
-          staging="claudtributter"
+          staging="clautribution"
           mkdir -p "${staging}/bin" "${staging}/.claude-plugin" "${staging}/hooks"
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "${staging}/bin/${{ matrix.binary }}"
           cp .claude-plugin/plugin.json "${staging}/.claude-plugin/plugin.json"
@@ -48,18 +48,18 @@ jobs:
           with open('hooks/hooks.json') as f:
               data = json.load(f)
           raw = json.dumps(data)
-          raw = raw.replace('target/release/claudtributter', 'bin/claudtributter')
+          raw = raw.replace('target/release/clautribution', 'bin/clautribution')
           with open(sys.argv[1], 'w') as f:
               f.write(raw)
           " "${staging}/hooks/hooks.json"
-          zip -r "claudtributter-${tag}-${{ matrix.target }}.zip" "${staging}/"
+          zip -r "clautribution-${tag}-${{ matrix.target }}.zip" "${staging}/"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
           tag="${GITHUB_REF_NAME}"
-          staging="claudtributter"
+          staging="clautribution"
           mkdir -p "${staging}/bin" "${staging}/.claude-plugin" "${staging}/hooks"
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "${staging}/bin/${{ matrix.binary }}"
           cp .claude-plugin/plugin.json "${staging}/.claude-plugin/plugin.json"
@@ -68,16 +68,16 @@ jobs:
           with open('hooks/hooks.json') as f:
               data = json.load(f)
           raw = json.dumps(data)
-          raw = raw.replace('target/release/claudtributter', 'bin/claudtributter.exe')
+          raw = raw.replace('target/release/clautribution', 'bin/clautribution.exe')
           with open(sys.argv[1], 'w') as f:
               f.write(raw)
           " "${staging}/hooks/hooks.json"
-          7z a "claudtributter-${tag}-${{ matrix.target }}.zip" "${staging}/"
+          7z a "clautribution-${tag}-${{ matrix.target }}.zip" "${staging}/"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: claudtributter-${{ matrix.target }}
-          path: claudtributter-*.zip
+          name: clautribution-${{ matrix.target }}
+          path: clautribution-*.zip
 
   release:
     needs: build
@@ -92,5 +92,5 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: claudtributter-*.zip
+          files: clautribution-*.zip
           prerelease: ${{ contains(github.ref_name, '-') }}

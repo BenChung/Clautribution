@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Metadata about the initial prompt that started this session.
-/// Stored as `.claudetributer/prompt-{session_id}.json`.
+/// Stored as `.clautribution/prompt-{session_id}.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptMetadata {
     pub prompt: String,
@@ -12,7 +12,7 @@ pub struct PromptMetadata {
 
 /// Breadcrumb left after a nonproductive stop so the next productive stop
 /// can walk the full transcript span since the last commit.
-/// Stored as `.claudetributer/continuation-{session_id}.json`.
+/// Stored as `.clautribution/continuation-{session_id}.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContinuationBreadcrumb {
     pub tail_uuid: String,
@@ -21,7 +21,7 @@ pub struct ContinuationBreadcrumb {
 
 /// One captured iteration of a plan: the user prompt that produced it and
 /// the plan text from the `ExitPlanMode` tool call.
-/// Stored as an array in `.claudetributer/plan-history-{session_id}.json`.
+/// Stored as an array in `.clautribution/plan-history-{session_id}.json`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PlanSnapshot {
     pub prompt: String,
@@ -30,7 +30,7 @@ pub struct PlanSnapshot {
 
 /// Cross-session context for a plan: the original user prompt that initiated
 /// planning and any Q&A interactions that shaped the plan.
-/// Stored as `.claudetributer/plan-context.json` (project-wide, NOT
+/// Stored as `.clautribution/plan-context.json` (project-wide, NOT
 /// session-specific) so it survives across the planning→implementation
 /// session boundary.  Consumed and cleared by the productive stop that
 /// commits the plan's implementation.

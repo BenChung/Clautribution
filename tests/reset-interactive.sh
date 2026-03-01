@@ -15,7 +15,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 INTERACTIVE="$SCRIPT_DIR/interactive"
 
 # --- Build the binary ---
-echo "Building claudtributter ..."
+echo "Building clautribution ..."
 cargo build --release --manifest-path "$PROJECT_DIR/Cargo.toml"
 
 # --- Reset the interactive repo (preserve directory inode) ---
@@ -30,11 +30,11 @@ git -C "$INTERACTIVE" config user.name "Test"
 git -C "$INTERACTIVE" config user.email "test@test.com"
 
 cat > "$INTERACTIVE/README" <<'EOF'
-Interactive test directory for claudtributter
+Interactive test directory for clautribution
 EOF
 
 cat > "$INTERACTIVE/.gitignore" <<'EOF'
-.claudetributer
+.clautribution
 .claude
 EOF
 

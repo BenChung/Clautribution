@@ -45,13 +45,13 @@ fn hint(message: String) -> Option<HookOutput> {
 /// Detect whether a UserPromptSubmit prompt is a `/preview` skill invocation.
 fn is_preview_command(prompt: &str) -> bool {
     let p = prompt.trim();
-    p == "/preview" || p == "/claudtributter:preview"
+    p == "/preview" || p == "/clautribution:preview"
 }
 
 /// Detect whether a UserPromptSubmit prompt is a `/drop` skill invocation.
 fn is_drop_command(prompt: &str) -> bool {
     let p = prompt.trim();
-    p == "/drop" || p == "/claudtributter:drop"
+    p == "/drop" || p == "/clautribution:drop"
 }
 
 pub fn read_transcript(path: &str) -> Result<Transcript> {
@@ -62,7 +62,7 @@ pub fn read_transcript(path: &str) -> Result<Transcript> {
     };
     let (transcript, errors) = Transcript::parse(&contents);
     for (line, err) in &errors {
-        eprintln!("claudtributter: transcript parse error at line {line}: {err}");
+        eprintln!("clautribution: transcript parse error at line {line}: {err}");
     }
     Ok(transcript)
 }
@@ -111,7 +111,7 @@ pub struct Session {
 }
 
 impl Session {
-    /// Open the git repo from `cwd`, ensure `.claudetributer/` exists, load
+    /// Open the git repo from `cwd`, ensure `.clautribution/` exists, load
     /// preferences, and return a `Session` ready for use.
     pub fn open(cwd: &str, session_id: &str) -> Result<Self> {
         let repo = git2::Repository::discover(cwd)
@@ -119,7 +119,7 @@ impl Session {
         let workdir = repo
             .workdir()
             .context("git repo is bare, no working directory")?;
-        let dir = workdir.join(".claudetributer");
+        let dir = workdir.join(".clautribution");
         if !dir.exists() {
             fs::create_dir_all(&dir)
                 .with_context(|| format!("creating {}", dir.display()))?;
@@ -168,7 +168,7 @@ impl Session {
     // ---------------------------------------------------------------
 
     /// Check whether the repo has any uncommitted or untracked changes,
-    /// excluding `.claudetributer/` (which is never staged by `commit_changes`).
+    /// excluding `.clautribution/` (which is never staged by `commit_changes`).
     fn has_uncommitted_changes(&self) -> Result<bool> {
         let mut opts = git2::StatusOptions::new();
         opts.include_untracked(true).include_ignored(false);
@@ -176,12 +176,12 @@ impl Session {
             .context("checking git status")?;
         let all_in_metadata = statuses.iter().all(|s| {
             s.path()
-                .is_some_and(|p| std::path::Path::new(p).starts_with(".claudetributer"))
+                .is_some_and(|p| std::path::Path::new(p).starts_with(".clautribution"))
         });
         Ok(!statuses.is_empty() && !all_in_metadata)
     }
 
-    /// Stage all changes (including untracked files) except `.claudetributer/`,
+    /// Stage all changes (including untracked files) except `.clautribution/`,
     /// commit, and return the new commit OID.
     fn commit_changes(&self, message: &str) -> Result<git2::Oid> {
         let mut index = self.repo.index().context("opening index")?;
@@ -190,7 +190,7 @@ impl Session {
                 ["*"].iter(),
                 git2::IndexAddOption::DEFAULT,
                 Some(&mut |path: &std::path::Path, _matched: &[u8]| {
-                    if path.starts_with(".claudetributer") {
+                    if path.starts_with(".clautribution") {
                         1 // skip
                     } else {
                         0 // add
@@ -241,7 +241,7 @@ impl Session {
         Ok(())
     }
 
-    /// Undo consecutive claudtributter commits at HEAD (identified by
+    /// Undo consecutive clautribution commits at HEAD (identified by
     /// `refs/notes/tail`) using mixed resets until the working tree is
     /// clean.  This aligns git with Claude Code's built-in `/rewind`
     /// command, which restores files but doesn't touch git history.
@@ -259,7 +259,7 @@ impl Session {
                 None => break,
             };
 
-            // Only undo commits that claudtributter created.
+            // Only undo commits that clautribution created.
             if self.read_note("refs/notes/tail", commit.id()).is_none() {
                 break;
             }
@@ -272,7 +272,7 @@ impl Session {
             // Mixed reset: move HEAD back, keep working tree as /rewind left it.
             self.repo
                 .reset(parent.as_object(), git2::ResetType::Mixed, None)
-                .context("resetting past claudtributter commit")?;
+                .context("resetting past clautribution commit")?;
             did_anything = true;
 
             if !self.has_uncommitted_changes()? {
@@ -282,10 +282,10 @@ impl Session {
         Ok(did_anything)
     }
 
-    /// Check whether `.claudetributer` is covered by the repo's ignore rules.
+    /// Check whether `.clautribution` is covered by the repo's ignore rules.
     fn is_data_dir_ignored(&self) -> bool {
         self.repo
-            .is_path_ignored(std::path::Path::new(".claudetributer"))
+            .is_path_ignored(std::path::Path::new(".clautribution"))
             .unwrap_or(false)
     }
 
@@ -622,7 +622,7 @@ impl Session {
                 if self.prefs.warn_branches.iter().any(|b| b == branch) {
                     warnings.push(format!(
                         "on branch `{branch}` — \
-                         claudtributter makes frequent commits; consider using a feature branch"
+                         clautribution makes frequent commits; consider using a feature branch"
                     ));
                 }
             }
@@ -630,8 +630,8 @@ impl Session {
 
         if !self.is_data_dir_ignored() {
             warnings.push(
-                ".claudetributer is not in .gitignore — \
-                 add it to avoid committing claudtributer metadata"
+                ".clautribution is not in .gitignore — \
+                 add it to avoid committing clautribution metadata"
                     .into(),
             );
         }
@@ -648,7 +648,7 @@ impl Session {
             Ok(None)
         } else {
             Ok(hint(format!(
-                "[claudtributter] warning: {}",
+                "[clautribution] warning: {}",
                 warnings.join("; ")
             )))
         }
@@ -668,7 +668,7 @@ impl Session {
         }
 
         if self.has_uncommitted_changes()? {
-            // If HEAD is a claudtributter commit, this may be a post-/rewind
+            // If HEAD is a clautribution commit, this may be a post-/rewind
             // state where Claude Code restored files but git still has our
             // commits.  Undo them to align git with the rewind.
             if self.align_git_with_rewind()? && !self.has_uncommitted_changes()? {
@@ -707,7 +707,7 @@ impl Session {
 
         self.write_prompt_metadata(input, &transcript)?;
 
-        Ok(hint("[claudtributter] tracking prompt".into()))
+        Ok(hint("[clautribution] tracking prompt".into()))
     }
 
     /// Handle a `/preview` skill invocation: build the stop context,
@@ -752,13 +752,13 @@ impl Session {
     }
 
     /// Discover the active session ID by scanning for `prompt-*.json`
-    /// files in `.claudetributer/`.  Returns `None` if no prompt file
+    /// files in `.clautribution/`.  Returns `None` if no prompt file
     /// exists.
     pub fn active_session_id(&self) -> Result<Option<String>> {
         let entries = match fs::read_dir(&self.dir) {
             Ok(e) => e,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e).context("reading .claudetributer"),
+            Err(e) => return Err(e).context("reading .clautribution"),
         };
         let mut candidates: Vec<(std::time::SystemTime, String)> = Vec::new();
         for entry in entries.flatten() {
