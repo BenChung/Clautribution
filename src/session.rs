@@ -241,6 +241,47 @@ impl Session {
         Ok(())
     }
 
+    /// Undo consecutive claudtributter commits at HEAD (identified by
+    /// `refs/notes/tail`) using mixed resets until the working tree is
+    /// clean.  This aligns git with Claude Code's built-in `/rewind`
+    /// command, which restores files but doesn't touch git history.
+    /// Returns `true` if any commits were undone.
+    fn align_git_with_rewind(&self) -> Result<bool> {
+        let mut did_anything = false;
+        loop {
+            let commit = match self
+                .repo
+                .head()
+                .ok()
+                .and_then(|h| h.peel_to_commit().ok())
+            {
+                Some(c) => c,
+                None => break,
+            };
+
+            // Only undo commits that claudtributter created.
+            if self.read_note("refs/notes/tail", commit.id()).is_none() {
+                break;
+            }
+
+            let parent = match commit.parent(0) {
+                Ok(p) => p,
+                Err(_) => break,
+            };
+
+            // Mixed reset: move HEAD back, keep working tree as /rewind left it.
+            self.repo
+                .reset(parent.as_object(), git2::ResetType::Mixed, None)
+                .context("resetting past claudtributter commit")?;
+            did_anything = true;
+
+            if !self.has_uncommitted_changes()? {
+                break;
+            }
+        }
+        Ok(did_anything)
+    }
+
     /// Check whether `.claudetributer` is covered by the repo's ignore rules.
     fn is_data_dir_ignored(&self) -> bool {
         self.repo
@@ -627,15 +668,25 @@ impl Session {
         }
 
         if self.has_uncommitted_changes()? {
-            return Ok(Some(HookOutput {
-                decision: Some("block".into()),
-                reason: Some(
-                    "There are uncommitted changes. Please commit your manual changes \
-                     before prompting Claude."
-                        .into(),
-                ),
-                ..Default::default()
-            }));
+            // If HEAD is a claudtributter commit, this may be a post-/rewind
+            // state where Claude Code restored files but git still has our
+            // commits.  Undo them to align git with the rewind.
+            if self.align_git_with_rewind()? && !self.has_uncommitted_changes()? {
+                // Rewind aligned — also clear stale tracking state.
+                self.clear_prompt_metadata()?;
+                self.clear_breadcrumb()?;
+                self.clear_drop_marker()?;
+            } else {
+                return Ok(Some(HookOutput {
+                    decision: Some("block".into()),
+                    reason: Some(
+                        "There are uncommitted changes. Please commit your manual changes \
+                         before prompting Claude."
+                            .into(),
+                    ),
+                    ..Default::default()
+                }));
+            }
         }
 
         let transcript = read_transcript(&input.common.transcript_path)?;
