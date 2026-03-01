@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
-git2 = "0.20.4"
+git2 = { version = "0.20.4", features = ["vendored-openssl"] }
 minijinja = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.149"

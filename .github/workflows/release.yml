@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: claudtributter
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            binary: claudtributter
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            binary: claudtributter
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: claudtributter.exe
+
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Test
+        run: cargo test --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          staging="claudtributter"
+          mkdir -p "${staging}/bin" "${staging}/.claude-plugin" "${staging}/hooks"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "${staging}/bin/${{ matrix.binary }}"
+          cp .claude-plugin/plugin.json "${staging}/.claude-plugin/plugin.json"
+          python3 -c "
+          import json, sys
+          with open('hooks/hooks.json') as f:
+              data = json.load(f)
+          raw = json.dumps(data)
+          raw = raw.replace('target/release/claudtributter', 'bin/claudtributter')
+          with open(sys.argv[1], 'w') as f:
+              f.write(raw)
+          " "${staging}/hooks/hooks.json"
+          zip -r "claudtributter-${tag}-${{ matrix.target }}.zip" "${staging}/"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          staging="claudtributter"
+          mkdir -p "${staging}/bin" "${staging}/.claude-plugin" "${staging}/hooks"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "${staging}/bin/${{ matrix.binary }}"
+          cp .claude-plugin/plugin.json "${staging}/.claude-plugin/plugin.json"
+          python -c "
+          import json, sys
+          with open('hooks/hooks.json') as f:
+              data = json.load(f)
+          raw = json.dumps(data)
+          raw = raw.replace('target/release/claudtributter', 'bin/claudtributter.exe')
+          with open(sys.argv[1], 'w') as f:
+              f.write(raw)
+          " "${staging}/hooks/hooks.json"
+          7z a "claudtributter-${tag}-${{ matrix.target }}.zip" "${staging}/"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claudtributter-${{ matrix.target }}
+          path: claudtributter-*.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: claudtributter-*.zip
+          prerelease: ${{ contains(github.ref_name, '-') }}
