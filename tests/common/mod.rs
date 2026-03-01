@@ -46,6 +46,9 @@ pub fn temp_git_repo() -> tempfile::TempDir {
 }
 
 pub fn common(cwd: &str, transcript_path: &str) -> String {
+    // Escape backslashes so Windows paths produce valid JSON.
+    let cwd = cwd.replace('\\', "\\\\");
+    let transcript_path = transcript_path.replace('\\', "\\\\");
     format!(
         r#"
     "session_id": "test-session",
