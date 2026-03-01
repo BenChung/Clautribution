@@ -120,6 +120,15 @@ fn main() {
     }
 }
 
+/// Check whether an error chain indicates that no git repository was found.
+fn is_no_git_repo(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<git2::Error>()
+            .is_some_and(|e| e.code() == git2::ErrorCode::NotFound)
+    })
+}
+
 fn run_hook() -> Result<()> {
     let input = read_stdin()?;
     let hook_input: HookInput = serde_json::from_str(&input)?;
@@ -144,6 +153,9 @@ fn run_hook() -> Result<()> {
             );
         }
         Ok(None) => {}
+        Err(err) if is_no_git_repo(&err) => {
+            // Not inside a git repository — nothing to do.
+        }
         Err(err) => return Err(err),
     }
     Ok(())
