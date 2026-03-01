@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Metadata about the initial prompt that started this session.
 /// Stored as `.claudetributer/prompt-{session_id}.json`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptMetadata {
     pub prompt: String,
     pub session_id: String,
@@ -13,7 +13,7 @@ pub struct PromptMetadata {
 /// Breadcrumb left after a nonproductive stop so the next productive stop
 /// can walk the full transcript span since the last commit.
 /// Stored as `.claudetributer/continuation-{session_id}.json`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContinuationBreadcrumb {
     pub tail_uuid: String,
     pub session_id: String,

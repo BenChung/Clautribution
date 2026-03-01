@@ -221,6 +221,13 @@ fn resolve_metadata(ctx: &StopContext) -> Option<ResolvedMetadata> {
 
     // Source 3: last user text in the transcript.
     if let Some((uuid, text, plan_content)) = ctx.transcript.last_user_text() {
+        // If this entry is at or before the committed tail, it's already
+        // been committed (or dropped) — treat as no metadata.
+        if let Some(ct) = ctx.committed_tail.as_deref() {
+            if uuid == ct || ctx.transcript.is_ancestor(ct, uuid) {
+                return None;
+            }
+        }
         // When planContent is present the user text is Claude Code's
         // auto-injected scaffolding ("Implement the following plan: ...").
         // Use a concise title derived from the plan content instead.

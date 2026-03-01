@@ -82,6 +82,12 @@ pub struct ConversationEntry {
     /// the user approves an ExitPlanMode plan.
     #[serde(default)]
     pub plan_content: Option<String>,
+    /// Auto-generated compaction summary entry.
+    #[serde(default)]
+    pub is_compact_summary: bool,
+    /// Synthetic message generated for API errors (rate limits, etc.).
+    #[serde(default)]
+    pub is_api_error_message: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -652,6 +658,9 @@ impl Transcript {
     pub fn last_user_text(&self) -> Option<(&str, &str, Option<&str>)> {
         self.entries.iter().rev().find_map(|entry| {
             if let TranscriptEntry::User(conv) = entry {
+                if conv.is_compact_summary {
+                    return None;
+                }
                 if let MessageContent::Text(t) = &conv.message.content {
                     return Some((
                         conv.uuid.as_str(),
@@ -797,6 +806,9 @@ impl Transcript {
                     }
                 }
                 TranscriptEntry::Assistant(conv) => {
+                    if conv.is_api_error_message {
+                        continue;
+                    }
                     if let MessageContent::Blocks(blocks) = &conv.message.content {
                         for block in blocks {
                             match block {

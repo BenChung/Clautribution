@@ -2,11 +2,11 @@ use anyhow::{Context, Result};
 use crate::decision::{decide_stop, StopContext, StopDecision};
 use crate::metadata::{ContinuationBreadcrumb, PlanContext, PlanSnapshot, PromptMetadata};
 use crate::preferences::{CommitTemplate, Preferences};
+use crate::transcript::{Transcript, Verbosity};
 use serde::de::DeserializeOwned;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use crate::transcript::Transcript;
 use crate::types::{
     HookOutput, SessionEndInput, SessionStartInput, SessionStartSource, StopInput,
     UserPromptSubmitInput,
@@ -42,6 +42,18 @@ fn hint(message: String) -> Option<HookOutput> {
     })
 }
 
+/// Detect whether a UserPromptSubmit prompt is a `/preview` skill invocation.
+fn is_preview_command(prompt: &str) -> bool {
+    let p = prompt.trim();
+    p == "/preview" || p == "/claudtributter:preview"
+}
+
+/// Detect whether a UserPromptSubmit prompt is a `/drop` skill invocation.
+fn is_drop_command(prompt: &str) -> bool {
+    let p = prompt.trim();
+    p == "/drop" || p == "/claudtributter:drop"
+}
+
 pub fn read_transcript(path: &str) -> Result<Transcript> {
     let contents = match fs::read_to_string(path) {
         Ok(c) => c,
@@ -53,6 +65,42 @@ pub fn read_transcript(path: &str) -> Result<Transcript> {
         eprintln!("claudtributter: transcript parse error at line {line}: {err}");
     }
     Ok(transcript)
+}
+
+/// All the owned data needed to construct a borrowed `StopContext`.
+/// Returned by `Session::build_stop_context` so callers can derive a
+/// `StopContext` reference without duplicating the gathering logic.
+pub struct OwnedStopContext {
+    pub transcript: Transcript,
+    pub file_metadata: Option<PromptMetadata>,
+    pub pending_plan: Option<String>,
+    pub plan_context: Option<PlanContext>,
+    pub plan_entries: Vec<serde_json::Value>,
+    pub session_id: String,
+    pub breadcrumb: Option<ContinuationBreadcrumb>,
+    pub committed_tail: Option<String>,
+    pub has_uncommitted_changes: bool,
+    pub commit_template: String,
+    pub verbosity: Verbosity,
+}
+
+impl OwnedStopContext {
+    /// Produce a borrowed `StopContext` referencing this struct's data.
+    pub fn as_ref(&self) -> StopContext<'_> {
+        StopContext {
+            transcript: &self.transcript,
+            file_metadata: self.file_metadata.clone(),
+            pending_plan: self.pending_plan.clone(),
+            plan_context: self.plan_context.clone(),
+            plan_entries: self.plan_entries.clone(),
+            session_id: &self.session_id,
+            breadcrumb: self.breadcrumb.clone(),
+            committed_tail: self.committed_tail.clone(),
+            has_uncommitted_changes: self.has_uncommitted_changes,
+            commit_template: &self.commit_template,
+            verbosity: self.verbosity,
+        }
+    }
 }
 
 pub struct Session {
@@ -95,6 +143,10 @@ impl Session {
 
     fn continuation_path(&self) -> PathBuf {
         self.dir.join(format!("continuation-{}.json", self.session_id))
+    }
+
+    fn drop_marker_path(&self) -> PathBuf {
+        self.dir.join(format!("drop-marker-{}.json", self.session_id))
     }
 
     fn plan_history_path(&self) -> PathBuf {
@@ -247,6 +299,31 @@ impl Session {
     /// Delete the continuation breadcrumb for this session if it exists.
     fn clear_breadcrumb(&self) -> Result<()> {
         remove_if_exists(&self.continuation_path())
+    }
+
+    // ---------------------------------------------------------------
+    // Drop marker (antibreadcrumb)
+    // ---------------------------------------------------------------
+
+    /// Read the drop marker — a transcript tail UUID written by `/drop`
+    /// that acts as a synthetic `committed_tail`.  Cleared on productive
+    /// commit.
+    fn read_drop_marker(&self) -> Result<Option<String>> {
+        let path = self.drop_marker_path();
+        match fs::read_to_string(&path) {
+            Ok(s) => Ok(Some(s.trim().to_string())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
+    pub fn write_drop_marker(&self, tail_uuid: &str) -> Result<()> {
+        let path = self.drop_marker_path();
+        fs::write(&path, tail_uuid).with_context(|| format!("writing {}", path.display()))
+    }
+
+    fn clear_drop_marker(&self) -> Result<()> {
+        remove_if_exists(&self.drop_marker_path())
     }
 
     // ---------------------------------------------------------------
@@ -467,9 +544,13 @@ impl Session {
     pub fn handle_session_start(&self, input: &SessionStartInput) -> Result<Option<HookOutput>> {
         let mut warnings: Vec<String> = Vec::new();
 
-        // On resume/clear/compact, clean up this session's stale prompt metadata
-        // so tracking starts fresh.
-        if input.source != SessionStartSource::Startup {
+        // On resume/clear, clean up this session's stale prompt metadata
+        // so tracking starts fresh.  Compact preserves the original prompt
+        // metadata so the commit message uses the real user prompt rather
+        // than the auto-generated compaction summary.
+        if input.source != SessionStartSource::Startup
+            && input.source != SessionStartSource::Compact
+        {
             self.clear_prompt_metadata()?;
             self.clear_breadcrumb()?;
         }
@@ -536,6 +617,15 @@ impl Session {
         &self,
         input: &UserPromptSubmitInput,
     ) -> Result<Option<HookOutput>> {
+        // Intercept /preview and /drop skill invocations so the output
+        // is relayed verbatim via the block reason (skills get paraphrased).
+        if is_preview_command(&input.prompt) {
+            return self.handle_preview_command(&input.common.transcript_path);
+        }
+        if is_drop_command(&input.prompt) {
+            return self.handle_drop_command(&input.common.transcript_path);
+        }
+
         if self.has_uncommitted_changes()? {
             return Ok(Some(HookOutput {
                 decision: Some("block".into()),
@@ -569,37 +659,169 @@ impl Session {
         Ok(hint("[claudtributter] tracking prompt".into()))
     }
 
-    pub fn handle_stop(&self, input: &StopInput) -> Result<Option<HookOutput>> {
-        let transcript = read_transcript(&input.common.transcript_path)?;
+    /// Handle a `/preview` skill invocation: build the stop context,
+    /// run the decision logic, and return the commit message verbatim
+    /// as a block reason.
+    fn handle_preview_command(&self, transcript_path: &str) -> Result<Option<HookOutput>> {
+        let mut owned = self.build_stop_context(transcript_path)?;
+        // Force productive path so we always render a commit message,
+        // even when there are no uncommitted changes yet.
+        owned.has_uncommitted_changes = true;
+        let ctx = owned.as_ref();
+        let decision = decide_stop(&ctx).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let message = match decision {
+            StopDecision::NoMetadata => "No prompt metadata — nothing to preview.".to_string(),
+            StopDecision::NoTail => "No transcript tail — nothing to preview.".to_string(),
+            StopDecision::Productive { commit_message, .. } => commit_message,
+            StopDecision::Nonproductive { .. } => "No preview available.".to_string(),
+        };
+        Ok(Some(HookOutput {
+            decision: Some("block".into()),
+            reason: Some(message),
+            ..Default::default()
+        }))
+    }
 
-        // --- Gather all I/O-derived state ---
+    /// Handle a `/drop` skill invocation: record the current transcript
+    /// tail as a drop marker (antibreadcrumb) and clear accumulated state.
+    fn handle_drop_command(&self, transcript_path: &str) -> Result<Option<HookOutput>> {
+        let transcript = read_transcript(transcript_path)?;
+        if let Some(tail) = transcript.conversation_tail() {
+            self.write_drop_marker(tail)?;
+        }
+        self.drop_accumulated()?;
+        Ok(Some(HookOutput {
+            decision: Some("block".into()),
+            reason: Some(
+                "Accumulated state dropped. Future commits will start from this point."
+                    .into(),
+            ),
+            ..Default::default()
+        }))
+    }
+
+    /// Discover the active session ID by scanning for `prompt-*.json`
+    /// files in `.claudetributer/`.  Returns `None` if no prompt file
+    /// exists.
+    pub fn active_session_id(&self) -> Result<Option<String>> {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).context("reading .claudetributer"),
+        };
+        let mut candidates: Vec<(std::time::SystemTime, String)> = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_str().unwrap_or("");
+            if let Some(rest) = name.strip_prefix("prompt-") {
+                if let Some(sid) = rest.strip_suffix(".json") {
+                    let mtime = entry
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::UNIX_EPOCH);
+                    candidates.push((mtime, sid.to_string()));
+                }
+            }
+        }
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        Ok(candidates.into_iter().next().map(|(_, sid)| sid))
+    }
+
+    /// Return the Claude Code projects directory for this repo's workdir,
+    /// e.g. `~/.claude/projects/-home-user-myrepo/`.
+    fn claude_projects_dir(&self) -> Result<PathBuf> {
+        let workdir = self
+            .repo
+            .workdir()
+            .context("bare repo")?
+            .canonicalize()
+            .context("canonicalize workdir")?;
+        let workdir_str = workdir.to_str().context("non-UTF-8 workdir")?;
+        // Convention: /foo/bar → -foo-bar
+        let mangled = workdir_str.replace('/', "-");
+        let home = std::env::var("HOME").context("$HOME not set")?;
+        Ok(PathBuf::from(format!("{home}/.claude/projects/{mangled}")))
+    }
+
+    /// Discover the most recently modified session transcript (`.jsonl`)
+    /// in the Claude Code projects directory.  Returns the session ID
+    /// and full transcript path.
+    pub fn active_transcript(&self) -> Result<Option<(String, String)>> {
+        let dir = self.claude_projects_dir()?;
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).context("reading claude projects dir"),
+        };
+        let mut candidates: Vec<(std::time::SystemTime, String, PathBuf)> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let sid = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            if sid.is_empty() {
+                continue;
+            }
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            candidates.push((mtime, sid, path));
+        }
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        Ok(candidates.into_iter().next().map(|(_, sid, path)| {
+            (sid, path.to_str().unwrap_or("").to_string())
+        }))
+    }
+
+    /// Gather all I/O-derived state needed for `decide_stop` into an
+    /// owned struct.  Used by both `handle_stop` (hook path) and the
+    /// `preview` subcommand.
+    pub fn build_stop_context(&self, transcript_path: &str) -> Result<OwnedStopContext> {
+        let transcript = read_transcript(transcript_path)?;
         let plan_context = self.read_plan_context()?;
-        // If a planning session ID was stored, re-read its JSONL transcript
-        // now (at commit time) to obtain the planning entries for the note.
         let plan_entries = match plan_context
             .as_ref()
             .and_then(|pc| pc.planning_session_id.as_deref())
         {
-            Some(sid) => {
-                self.read_planning_session_entries(&input.common.transcript_path, sid)?
-            }
+            Some(sid) => self.read_planning_session_entries(transcript_path, sid)?,
             None => vec![],
         };
-        let ctx = StopContext {
-            transcript: &transcript,
+        Ok(OwnedStopContext {
+            transcript,
             file_metadata: self.read_prompt_metadata()?,
             pending_plan: self.read_pending_plan()?,
             plan_context,
             plan_entries,
-            session_id: &self.session_id,
+            session_id: self.session_id.clone(),
             breadcrumb: self.read_breadcrumb()?,
-            committed_tail: self
-                .head_oid()
-                .and_then(|oid| self.read_note("refs/notes/tail", oid)),
+            committed_tail: self.read_drop_marker()?.or_else(|| {
+                self.head_oid()
+                    .and_then(|oid| self.read_note("refs/notes/tail", oid))
+            }),
             has_uncommitted_changes: self.has_uncommitted_changes()?,
-            commit_template: &self.load_commit_template()?,
+            commit_template: self.load_commit_template()?,
             verbosity: self.prefs.summary_verbosity(),
-        };
+        })
+    }
+
+    /// Clear accumulated nonproductive state (prompt metadata and
+    /// continuation breadcrumb), resetting to the state as of the last
+    /// commit.
+    pub fn drop_accumulated(&self) -> Result<()> {
+        self.clear_prompt_metadata()?;
+        self.clear_breadcrumb()?;
+        Ok(())
+    }
+
+    pub fn handle_stop(&self, input: &StopInput) -> Result<Option<HookOutput>> {
+        let owned = self.build_stop_context(&input.common.transcript_path)?;
+        let ctx = owned.as_ref();
 
         // --- Decide (pure) ---
         let decision = decide_stop(&ctx).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -651,6 +873,7 @@ impl Session {
                 );
                 self.write_notes(oid, &notes)?;
                 self.clear_breadcrumb()?;
+                self.clear_drop_marker()?;
                 Ok(hint(hint_message))
             }
         }
@@ -659,6 +882,7 @@ impl Session {
     pub fn handle_session_end(&self, _input: &SessionEndInput) -> Result<Option<HookOutput>> {
         self.clear_prompt_metadata()?;
         self.clear_breadcrumb()?;
+        self.clear_drop_marker()?;
         self.clear_pending_plan()?;
         self.clear_plan_history()?;
         Ok(None)

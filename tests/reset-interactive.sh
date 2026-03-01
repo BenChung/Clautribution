@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 # Reset the tests/interactive directory to a fresh git repository and
-# register the claudtributter hooks into its .claude/settings.json.
+# build the binary.  The directory inode is preserved so shells already
+# cd'd into it keep working.
 #
-# Mirrors the setup in temp_git_repo() in tests/cli.rs:
-#   - git init
-#   - user.name = Test, user.email = test@test.com
-#   - initial commit with a README and .gitignore
-#
-# Then builds the binary and writes .claude/settings.json with hooks for
-# SessionStart, UserPromptSubmit, Stop, and SessionEnd (matching main.rs
-# dispatch).
+# Usage:
+#   ./tests/reset-interactive.sh
+#   cd tests/interactive
+#   ../run-claude.sh
 
 set -euo pipefail
 
@@ -19,14 +16,14 @@ INTERACTIVE="$SCRIPT_DIR/interactive"
 
 # --- Build the binary ---
 echo "Building claudtributter ..."
-cargo build --manifest-path "$PROJECT_DIR/Cargo.toml"
-BINARY="$PROJECT_DIR/target/debug/claudtributter"
+cargo build --release --manifest-path "$PROJECT_DIR/Cargo.toml"
 
-# --- Reset the interactive repo ---
+# --- Reset the interactive repo (preserve directory inode) ---
 echo "Resetting $INTERACTIVE ..."
 
-rm -rf "$INTERACTIVE"
-mkdir "$INTERACTIVE"
+mkdir -p "$INTERACTIVE"
+# Remove contents but keep the directory itself.
+find "$INTERACTIVE" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 
 git -C "$INTERACTIVE" init
 git -C "$INTERACTIVE" config user.name "Test"
@@ -44,56 +41,5 @@ EOF
 git -C "$INTERACTIVE" add README .gitignore
 git -C "$INTERACTIVE" commit -m "initial"
 
-# --- Register hooks ---
-mkdir -p "$INTERACTIVE/.claude"
-
-cat > "$INTERACTIVE/.claude/settings.json" <<EOF
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$BINARY"
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$BINARY"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$BINARY"
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$BINARY"
-          }
-        ]
-      }
-    ]
-  }
-}
-EOF
-
+echo ""
 echo "Done. Fresh repo at $INTERACTIVE"
-echo "Binary: $BINARY"
-echo "Hooks registered in $INTERACTIVE/.claude/settings.json"
