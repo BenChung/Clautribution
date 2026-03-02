@@ -1,0 +1,13 @@
+{
+  "name": "clautribution-marketplace",
+  "owner": {
+    "name": "Benjamin Chung"
+  },
+  "plugins": [
+    {
+      "name": "clautribution",
+      "source": "..",
+      "description": "Fine grained source attribution for Claude"
+    }
+  ]
+}
